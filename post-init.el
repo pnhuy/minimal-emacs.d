@@ -41,7 +41,7 @@
   (prog-mode . yas-minor-mode)
   :custom
   (yas-snippet-dirs
-   '("/home/huypham/.emacs.d/snippets"))
+   (list (expand-file-name "snippets" user-emacs-directory)))
   :config
   (yas-reload-all))
 
@@ -218,8 +218,10 @@
   (add-to-list
    'eglot-server-programs
 
+   ;; Resolved on `exec-path' at connect time rather than hardcoded, so
+   ;; this works wherever the Flutter SDK happens to be installed.
    '(dart-mode
-     . ("/home/huypham/develop/flutter/bin/dart"
+     . ("dart"
         "language-server"
         "--protocol=lsp"))))
 

@@ -3,6 +3,7 @@
 ;;; ----------------------------------------------------------------------
 ;;; Core
 ;;; ----------------------------------------------------------------------
+(add-to-list 'load-path (expand-file-name "lisp" user-emacs-directory))
 
 (setq package-install-upgrade-built-in t)
 
@@ -19,6 +20,20 @@
 ;; Copy from line above.
 (global-set-key (kbd "M-<up>") #'copy-from-above-command)
 
+(use-package undo-tree
+  :ensure t
+  :diminish
+  :init
+  (let ((history-directory
+         (expand-file-name "undo-tree-history/" user-emacs-directory)))
+    (unless (file-directory-p history-directory)
+      (with-file-modes #o700
+        (make-directory history-directory t)))
+    (setq undo-tree-history-directory-alist
+          `(("." . ,history-directory))
+          undo-tree-auto-save-history t))
+  :config
+  (global-undo-tree-mode 1))
 
 ;;; ----------------------------------------------------------------------
 ;;; Which Key
@@ -316,6 +331,10 @@
   (org-agenda-files
    '("~/Dropbox/Documents/org-roam/20250805110520-backlog.org")))
 
+(with-eval-after-load 'org       
+  (setq org-startup-indented t) ; Enable `org-indent-mode' by default
+  (add-hook 'org-mode-hook #'visual-line-mode))
+
 (defun my/org-regenerate-all-latex-previews ()
   "Clear and regenerate all LaTeX previews in the current Org buffer."
   (interactive)
@@ -458,20 +477,6 @@
    ("C-c n j" . org-roam-dailies-capture-today)))
 
 
-;;; ----------------------------------------------------------------------
-;;; Org Roam Ask
-;;; ----------------------------------------------------------------------
-
-;; Semantic search and Q&A over the org-roam notes, using local models
-;; served by Ollama. Needs an embedding model, installed once with:
-;;
-;;     ollama pull nomic-embed-text
-;;
-;; Then build the index with C-c n u (M-x org-roam-ask-index-build).
-;; Rebuilds are incremental: editing one heading re-embeds one chunk.
-
-(add-to-list 'load-path (expand-file-name "lisp" user-emacs-directory))
-
 (use-package org-roam-ask
   :ensure nil
 
@@ -544,14 +549,6 @@
   :config
   (super-save-mode 1))
 
-;; Agent-shell and codex
-(use-package gptel
-  :ensure t
-  ;;:config
-  ;;(gptel-make-openai-oauth "OpenAI-sub")
-  )
-
-
 ;; Sidebar
 (use-package dired-subtree
   :commands (dired-subtree-toggle dired-subtree-cycle)
@@ -581,21 +578,31 @@
 (use-package gptel
   :ensure t
   :config
-  (setq
-   gptel-model 'qwen3.5:4b
+  (setq gptel-model 'qwen3.5:2b
+        gptel-backend
+        (gptel-make-ollama
+         "Ollama"
+         :host "localhost:11434"
+         :stream t
+         :models
+         '((qwen3.5:2b
+            :description "Qwen3.5 2B local"
+            :capabilities (tool-use)))))
 
-   gptel-backend
-   (gptel-make-ollama
-       "Ollama"
-     :host "localhost:11434"
-     :stream t
-     :models
-     '((qwen3.5:4b
-        :description "Qwen3.5 4B local"
-        :capabilities (tool-use)))))
-  
-  ;; Optional: use Org buffers for gptel chats
+  ;; Register DeepSeek.  Store its key in ~/.authinfo.gpg as:
+  ;; machine api.deepseek.com login apikey password YOUR_API_KEY
+  (gptel-make-deepseek "DeepSeek"
+    :stream t
+    :key #'gptel-api-key-from-auth-source)
+
   (setq gptel-default-mode 'org-mode))
+
+(with-eval-after-load 'gptel-context
+  (set-face-attribute 'gptel-context-highlight-face nil
+                      :background 'unspecified
+                      :foreground 'unspecified
+                      :extend nil
+                      :inherit nil))
 
 (use-package gptel-agent
   :after gptel

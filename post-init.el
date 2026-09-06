@@ -20,6 +20,9 @@
 ;; Copy from line above.
 (global-set-key (kbd "M-<up>") #'copy-from-above-command)
 
+;; Enable delete-selection-mode
+(delete-selection-mode 1)
+
 (use-package undo-tree
   :ensure t
   :diminish

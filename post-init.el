@@ -168,7 +168,17 @@
   (corfu-count 12)
 
   ;; Show current candidate position.
-  (corfu-preselect 'prompt)
+  (corfu-preselect 'first)
+
+  :bind
+  (:map corfu-map
+        ;; TAB accepts completion
+        ("TAB" . corfu-insert)
+        ([tab] . corfu-insert)
+
+        ;; ENTER inserts newline instead of accepting completion
+        ("RET" . newline)
+        ([return] . newline))
 
   :init
   (global-corfu-mode 1))

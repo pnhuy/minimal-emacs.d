@@ -322,14 +322,35 @@
 ;;; ----------------------------------------------------------------------
 
 (use-package org
-  :ensure nil
+  :defer
+  :ensure `(org :repo "https://code.tecosaur.net/tec/org-mode.git/"
+                :branch "dev")
   :custom
-  ;; Latex Preview to temporary directory.
+  (org-indent-mode 1)
+  (org-startup-truncated nil)
   (org-preview-latex-default-process 'dvisvgm)
   (org-preview-latex-image-directory "/tmp/ltximg/")
-  ;; Org Agenda
   (org-agenda-files
-   '("~/Dropbox/Documents/org-roam/20250805110520-backlog.org")))
+   '("~/Dropbox/Documents/org-roam/20250805110520-backlog.org"))
+  :config
+  ;; enable org-indent-mode for all org buffers
+  (add-hook 'org-mode-hook #'org-indent-mode))
+
+(use-package org-fragtog
+  :ensure t
+  :hook
+  (org-mode . org-fragtog-mode))
+
+(use-package org-modern
+  :ensure t
+  :hook
+  (org-mode . org-modern-mode))
+
+(use-package org-modern-indent
+  :ensure `(org-modern-indent :repo "https://github.com/jdtsmith/org-modern-indent.git"
+                    :branch "main")
+  :hook
+  (org-mode . org-modern-indent-mode))
 
 (with-eval-after-load 'org       
   (setq org-startup-indented t) ; Enable `org-indent-mode' by default

@@ -5,8 +5,6 @@
 ;;; ----------------------------------------------------------------------
 (add-to-list 'load-path (expand-file-name "lisp" user-emacs-directory))
 
-(setq package-install-upgrade-built-in t)
-
 (load-theme 'modus-operandi-tinted t)
 
 ;; Font
@@ -79,6 +77,7 @@
 
 ;; Persist minibuffer history.
 (use-package savehist
+  :ensure nil
   :init
   (savehist-mode 1))
 
@@ -189,7 +188,8 @@
 ;;; ----------------------------------------------------------------------
 
 (use-package cape
-  :ensure t
+  ;; Finish the completion package queue before startup files run prog-mode-hook.
+  :ensure (:wait t)
   :after corfu)
 
 
@@ -336,7 +336,7 @@
 
 (use-package org
   :defer
-  :ensure `(org :repo "https://code.tecosaur.net/tec/org-mode.git/"
+  :ensure (org :repo "https://code.tecosaur.net/tec/org-mode.git/"
                 :branch "dev")
   :custom
   (org-indent-mode 1)
@@ -360,7 +360,7 @@
   (org-mode . org-modern-mode))
 
 (use-package org-modern-indent
-  :ensure `(org-modern-indent :repo "https://github.com/jdtsmith/org-modern-indent.git"
+  :ensure (org-modern-indent :repo "https://github.com/jdtsmith/org-modern-indent.git"
                     :branch "main")
   :hook
   (org-mode . org-modern-indent-mode))
@@ -608,6 +608,8 @@
   (setq dired-sidebar-use-term-integration t)
   (setq dired-sidebar-use-custom-font t))
 
+(use-package transient
+  :ensure t)
 
 (use-package gptel
   :ensure t
@@ -639,6 +641,7 @@
                       :inherit nil))
 
 (use-package gptel-agent
+  :ensure (:wait t)
   :after gptel
   :config
   (gptel-agent-update))

@@ -7,10 +7,12 @@
 
 (load-theme 'modus-operandi-tinted t)
 
-;; Font
+;; Font: keep the default when JetBrains Mono is unavailable.
+(when (and (display-graphic-p)
+           (find-font (font-spec :family "JetBrains Mono")))
 (set-face-attribute 'default nil
                     :family "JetBrains Mono"
-                    :height 140)
+                      :height 140))
 
 ;; Automatically reload buffers when files change on disk.
 (global-auto-revert-mode 1)
@@ -614,8 +616,6 @@
 (use-package gptel
   :ensure t
   :config
-  (setq gptel-model 'qwen3.5:2b
-        gptel-backend
         (gptel-make-ollama
          "Ollama"
          :host "localhost:11434"
@@ -623,13 +623,15 @@
          :models
          '((qwen3.5:2b
             :description "Qwen3.5 2B local"
-            :capabilities (tool-use)))))
+            :capabilities (tool-use))))
 
-  ;; Register DeepSeek.  Store its key in ~/.authinfo.gpg as:
+  ;; Use DeepSeek by default.  Store its key in ~/.authinfo.gpg as:
   ;; machine api.deepseek.com login apikey password YOUR_API_KEY
+  (setq gptel-model 'deepseek-chat
+        gptel-backend
   (gptel-make-deepseek "DeepSeek"
     :stream t
-    :key #'gptel-api-key-from-auth-source)
+          :key #'gptel-api-key-from-auth-source))
 
   (setq gptel-default-mode 'org-mode))
 

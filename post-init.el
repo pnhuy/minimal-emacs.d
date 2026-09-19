@@ -648,6 +648,20 @@
   :config
   (gptel-agent-update))
 
+(use-package ghostel
+  :ensure t)
+
+(use-package markdown-mode
+  :ensure t)
+
+(use-package smart-hungry-delete
+  :ensure t
+  :bind (([remap backward-delete-char-untabify] . smart-hungry-delete-backward-char)
+	       ([remap delete-backward-char] . smart-hungry-delete-backward-char)
+	       ([remap delete-char] . smart-hungry-delete-forward-char))
+  :init (smart-hungry-delete-add-default-hooks))
+
+
 (provide 'post-init)
 
 ;;; post-init.el ends here

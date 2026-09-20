@@ -654,12 +654,38 @@
 (use-package markdown-mode
   :ensure t)
 
+(use-package evil
+  :ensure t)
+
 (use-package smart-hungry-delete
   :ensure t
-  :bind (([remap backward-delete-char-untabify] . smart-hungry-delete-backward-char)
-	       ([remap delete-backward-char] . smart-hungry-delete-backward-char)
-	       ([remap delete-char] . smart-hungry-delete-forward-char))
-  :init (smart-hungry-delete-add-default-hooks))
+
+  :bind
+  (([remap backward-delete-char-untabify]
+    . smart-hungry-delete-backward-char)
+   ([remap delete-backward-char]
+    . smart-hungry-delete-backward-char)
+   ([remap delete-char]
+    . smart-hungry-delete-forward-char))
+
+  :init
+  (smart-hungry-delete-add-default-hooks)
+
+  :config
+  ;; Extra bindings only when Evil is available
+  (with-eval-after-load 'evil
+    (define-key evil-insert-state-map
+                (kbd "DEL")
+                #'smart-hungry-delete-backward-char)
+    (define-key evil-insert-state-map
+                (kbd "<backspace>")
+                #'smart-hungry-delete-backward-char)
+    (define-key evil-insert-state-map
+                (kbd "<delete>")
+                #'smart-hungry-delete-forward-char)))
+
+(use-package quickrun
+  :ensure t)
 
 
 (provide 'post-init)

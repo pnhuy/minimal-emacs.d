@@ -687,6 +687,9 @@
 (use-package quickrun
   :ensure t)
 
+(use-package elec-pair
+    :ensure nil
+    :hook (prog-mode . electric-pair-local-mode))
 
 (provide 'post-init)
 

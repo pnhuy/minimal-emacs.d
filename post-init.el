@@ -3,6 +3,7 @@
 ;;; ----------------------------------------------------------------------
 ;;; Core
 ;;; ----------------------------------------------------------------------
+(setq auth-sources (list "~/.authinfo"))
 (add-to-list 'load-path (expand-file-name "lisp" user-emacs-directory))
 
 (load-theme 'modus-operandi-tinted t)
@@ -10,12 +11,22 @@
 ;; Font: keep the default when JetBrains Mono is unavailable.
 (when (and (display-graphic-p)
            (find-font (font-spec :family "JetBrains Mono")))
-(set-face-attribute 'default nil
-                    :family "JetBrains Mono"
+  (set-face-attribute 'default nil
+                      :family "JetBrains Mono"
                       :height 140))
 
 ;; Automatically reload buffers when files change on disk.
 (global-auto-revert-mode 1)
+
+;; Emacs 30.2's project file reader fails when a project has no files.
+(defun my-project-read-file-name (prompt files &optional predicate hist mb-default)
+  "Read a project file, allowing a first file in an empty project."
+  (if files
+      (project--read-file-cpd-relative prompt files predicate hist mb-default)
+    (read-file-name (concat prompt ": ") default-directory nil nil nil predicate)))
+
+(with-eval-after-load 'project
+  (setq project-read-file-name-function #'my-project-read-file-name))
 
 ;; Copy from line above.
 (global-set-key (kbd "M-<up>") #'copy-from-above-command)
@@ -316,6 +327,37 @@
 
 
 ;;; ----------------------------------------------------------------------
+;;; Code folding
+;;; ----------------------------------------------------------------------
+
+(use-package hideshow
+  :ensure nil
+  :commands hs-minor-mode
+  :init
+  (defun my/enable-hideshow ()
+    "Enable Hideshow when the programming mode provides comment syntax."
+    (when (and (bound-and-true-p comment-start)
+               (bound-and-true-p comment-end))
+      (hs-minor-mode 1)))
+  :hook
+  (prog-mode . my/enable-hideshow)
+  :bind
+  (:map hs-minor-mode-map
+        ("C-c f t" . hs-toggle-hiding)
+        ("C-c f h" . hs-hide-block)
+        ("C-c f s" . hs-show-block)
+        ("C-c f H" . hs-hide-all)
+        ("C-c f S" . hs-show-all)
+        ("C-c f l" . hs-hide-level))
+  :custom
+  (hs-hide-comments-when-hiding-all nil)
+  :config
+  ;; Fold Dart classes and methods delimited by braces.
+  (add-to-list 'hs-special-modes-alist
+               '(dart-mode "{" "}" "/[*/]" nil nil)))
+
+
+;;; ----------------------------------------------------------------------
 ;;; Dart / Flutter
 ;;; ----------------------------------------------------------------------
 
@@ -549,6 +591,7 @@
   (eglot-managed-mode . eldoc-box-hover-mode)
 
   :custom
+  (eldoc-box-mouse-mode-idle-delay 1)
   (eldoc-box-max-pixel-width 500)
   (eldoc-box-max-pixel-height 200))
 
@@ -616,7 +659,7 @@
 (use-package gptel
   :ensure t
   :config
-        (gptel-make-ollama
+  (gptel-make-ollama
          "Ollama"
          :host "localhost:11434"
          :stream t
@@ -624,13 +667,20 @@
          '((qwen3.5:2b
             :description "Qwen3.5 2B local"
             :capabilities (tool-use))))
+  
+  (gptel-make-openai "OpenRouter"
+    :host "openrouter.ai"
+    :endpoint "/api/v1/chat/completions"
+    :stream t
+    :key #'gptel-api-key-from-auth-source
+    :models '(inclusionai/ling-3.0-flash))
 
   ;; Use DeepSeek by default.  Store its key in ~/.authinfo.gpg as:
   ;; machine api.deepseek.com login apikey password YOUR_API_KEY
   (setq gptel-model 'deepseek-chat
         gptel-backend
-  (gptel-make-deepseek "DeepSeek"
-    :stream t
+        (gptel-make-deepseek "DeepSeek"
+          :stream t
           :key #'gptel-api-key-from-auth-source))
 
   (setq gptel-default-mode 'org-mode))

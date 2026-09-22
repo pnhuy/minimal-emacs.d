@@ -83,7 +83,6 @@ Startup speed depends on hardware and disk speed. For consistent comparisons, te
 - [NagNawed](https://www.reddit.com/r/emacs/comments/1tuowci/comment/opormk7/): "I love this. Great starting point, even better than some of the distros (if you are not using evil mode)..."
 - [JamesBrickley](https://www.reddit.com/r/emacs/comments/1tzfbsq/comment/oqds13q/): "I'm really enjoying James Cherti's Minimal-Emacs.d, Compile-Angle, Easy-Session, and Buffer-Terminator packages."
 - [david-bakin](https://github.com/jamescherti/minimal-emacs.d/issues/94#issuecomment-4721692648): "This emacs-starter-kit framework is fantastic. After years ... actually, decades ... of just using someone else's .emacs.d configuration and then using emacs in a limited way (only to edit text and code and doing everything else at the command line or via other tools) I am now fully transitioning to Emacs as my everything and of all the frameworks I looked at this is the one I can really understand. (And your personal support obviously is part of that.) I'm working through init.el line-by-line (having already done early-init.el) and not only am I getting a better picture of Emacs customization than I've ever had, I'm actually configuring Emacs the way I really like, now that I'm learning what the knobs I can turn are."
-- [viperML](https://www.reddit.com/r/emacs/comments/1vq0aez/comment/p4af5a7/):  "Hey, I just want to deeply thank you for creating this! I've started using emacs recently, and your project allowed me to focus on configuring more impactful things. I also think a project like this is useful to clear the mist of knowledge regarding "tweaks" that don't really affect performance, and are snake oil. For now I include your repository in my .config/emacs, and even if in the future I fork it and go completely vanilla, it will have paid dividends. "
 - [jacmoe](https://www.reddit.com/r/emacs/comments/1vq0aez/comment/p5zmlmf/): "I've been using this for a while. It helped me to move away from Doom Emacs and into something manageable. Thanks, James! Also, I am one of the few Emacs users who are not using Emacs as a long running process, so fast and lightweight is what I want :)"
 
 Please share your configuration. It could serve as inspiration for other users.
@@ -383,6 +382,8 @@ To configure `corfu` and `cape`, add the following to `~/.emacs.d/post-init.el`:
 ```
 
 **Note:** Setting `corfu-auto` to `t` to enable automatic completion is discouraged for both performance and security reasons. Continuous polling of heavy completion-at-point functions (CAPFs) and external LSP servers on every keystroke introduces latency. More significantly, automatic completion introduces security vulnerabilities when working with untrusted code. This background parsing forces external binaries and language servers to process buffer contents without explicit user intent, creating attack vectors for arbitrary code execution. It is recommended to activate `corfu-auto` only in directories where all files are trusted.
+
+Related article: [Why Emacs Consult async searches feel slow and how to speed them up? (consult-fd, consult-find, consult-grep, consult-ripgrep...)](https://www.jamescherti.com/emacs-consult-speed-async-searche-grep-ripgrep-fd-find/)
 
 ### Vertico, Consult, Marginalia, and Embark
 
@@ -1710,6 +1711,8 @@ To configure the *vterm* package, add the following to your `~/.emacs.d/post-ini
 
 The `vterm` terminal emulator can be started with `M-x vterm`.
 
+Related article: [Why Your Emacs Terminal is Slow and the Configuration to Fix It (vterm, eat, ghostel, term, and ansi-term)](https://www.jamescherti.com/emacs-terminal-performance-vterm-eat-ansi-term-ghostel/)
+
 ### The Emacs spell checker
 
 The `ispell` package serves as the underlying interface in Emacs for communicating with external spell checking programs. Building upon this, the `flyspell` package is a built-in minor mode that provides on-the-fly spell checking. It highlights misspelled words as you type and offers interactive corrections.
@@ -1793,6 +1796,7 @@ In Emacs, customization variables modified via the UI (e.g., `M-x customize`) ar
 (setq mode-line-position-column-line-format '("%l:%C"))
 
 ;; Display of line numbers in the buffer:
+;; Read: https://www.jamescherti.com/emacs-display-line-numbers-mode-performance/
 (setq-default display-line-numbers-type 'relative)
 (dolist (hook '(prog-mode-hook text-mode-hook conf-mode-hook))
   (add-hook hook #'display-line-numbers-mode))
@@ -2261,7 +2265,7 @@ The *straight.el* package is a declarative package manager for Emacs that aims t
 
 ## Frequently asked questions
 
-### Why minimal-emacs.d uses `setq` instead of `setopt`
+### Why minimal-emacs.d uses `setq` instead of `setopt`?
 
 The *minimal-emacs.d* configuration prioritizes an optimized, fast startup. Using `setopt` introduces overhead due to its type checking and function execution. For the vast majority of variables, this overhead is unnecessary during the initial startup phase. Read: [Emacs startup: Why setq beats setopt, customize-set-variable, and use-package :custom?](https://www.jamescherti.com/emacs-why-use-setq-instead-setopt/)
 
@@ -2279,10 +2283,10 @@ Enabling `debug-on-error` at this stage allows you to catch errors that might ot
 
 It is recommended to read: [Configuring Emacs scrolling for better performance and usability](https://www.jamescherti.com/emacs-scrolling-better-performance-usability/)
 
-By default, minimal-emacs.d sets `scroll-conservatively` to `20`:
+By default, minimal-emacs.d sets `scroll-conservatively` to `11`:
 
 ```emacs-lisp
-(setq scroll-conservatively 20)  ; Default minimal-emacs.d value
+(setq scroll-conservatively 11)  ; Default minimal-emacs.d value
 ```
 
 This makes Emacs recenters the window when the cursor moves past `scroll-conservatively` lines beyond the window edge.
@@ -2643,13 +2647,6 @@ This will ensure that the *minimal-emacs.d* configuration loads `post-early-init
 
 Keep in mind that if you change the `minimal-emacs-user-directory`, *minimal-emacs.d* will attempt to load the rest of the configuration from that directory (e.g., `~/.config/minimal-emacs/post-early-init.el`, `~/.config/minimal-emacs/pre-init.el` and `~/.config/minimal-emacs/post-init.el`, etc.).
 
-### How to display Emacs startup duration?
-
-As an Emacs configuration grows, startup time can gradually increase. Measuring that increase accurately makes it easier to identify regressions. However, the built-in emacs-init-time function does not measure the entire startup sequence.
-
-Here is how to accurately measure your total Emacs startup time:
-**[Measuring Emacs Startup Time More Accurately Than the Built-in emacs-init-time Function](https://www.jamescherti.com/measuring-emacs-startup-time/)**
-
 ### How to make minimal-emacs.d install packages in the early-init phase instead of the init phase?
 
 NOTE: Running package initialization and installation during the early-init phase is **NOT RECOMMENDED** because this stage occurs before the GUI system, windowing, and comprehensive error-handling buffers are fully initialized. When package-install or `package-refresh-contents` triggers a failure-such as a TLS handshake error or a lost network connection-Emacs cannot yet render a graphical window to display the backtrace or warning. This results in a "silent" hang or a crash that provides no visual feedback to the user, forcing a pivot to a terminal to inspect standard output. Furthermore, many packages expect a fully functional frame and loaded user environment to configure themselves correctly; forcing them to load during early-init bypasses the intentional separation designed to let you set up UI-independent variables before the package system and GUI logic complicate the startup sequence.
@@ -2695,14 +2692,6 @@ To install and load packages during the early-init phase, add the following to `
 ;; TODO: Add your use-package packages here
 ```
 
-### How to compile Emacs for Performance on Linux and Unix systems?
-
-Most Linux distributions ship generic binaries compiled to run safely on a vast array of older hardware configurations. While this ensures broad compatibility, it sacrifices the speed that comes from using the specific, modern instruction sets of your processor. Compiling Emacs directly from source allows instructing the compiler to generate machine code targeted at your CPU architecture, resulting in a faster and more efficient runtime environment.
-
-Beyond raw hardware optimization, building from source enables dropping decades of legacy compatibility layers and embracing modern desktop technologies. For example, Wayland users can configure the build to bypass old X11 display protocols in favor of a Wayland environment, ensuring smoother rendering and better system integration...
-
-If you are interested in compiling Emacs, read: [A Technical Guide to Compiling Emacs for Performance on Linux and Unix systems](https://www.jamescherti.com/compiling-emacs/)
-
 ### How to prevent Emacs from writing custom setting amd maintain a version controller configuration?
 
 If you want to maintain a strictly version-controlled, declarative configuration, you should prevent the Emacs customization interface from automatically appending custom-set-variables blocks to your files.
@@ -2713,11 +2702,27 @@ If you want to maintain a strictly version-controlled, declarative configuration
   (advice-add 'custom-save-all :override #'ignore))
 ```
 
-### Plain Text Pasting (Fixing "Org-Mode Bleed")
+### How to optimize Emacs?
 
-Copying text from an Org buffer often results in unwanted colors, backgrounds, or text weights bleeding into the destination buffer. By default, vanilla Emacs preserves explicit text formatting (`face` properties) when copying and pasting to support rich-text environments. While standard syntax highlighting (`font-lock-face`) is automatically stripped, modes like `org-mode` rely heavily on the `face` property for their visual styling.
+- [Fixing Slow Scrolling in Emacs display-line-numbers-mode](https://www.jamescherti.com/emacs-display-line-numbers-mode-performance/): The display-line-numbers-mode and global-display-line-numbers-mode modes render line numbers in the margin of an Emacs window. Line-number display is implemented in the core C display engine, avoiding the overhead of legacy Elisp overlays like linum-mode. Despite the native C implementation, and even after configuring Emacs scrolling for better usability, specific configurations can still trigger expensive Lisp evaluations during the interactive command loop, vertical scrolling, and buffer initialization. This article outlines configurations that avoid unnecessary width calculations and initialization scans.
 
-To resolve this, read the article: [Emacs: Preventing Org-Mode formatting bleed when copy-pasting](https://www.jamescherti.com/emacs-fix-org-mode-copy-paste-yank-bleed/).
+- [Optimizing Emacs startup - Guide to deferred package loading with use-package](https://www.jamescherti.com/emacs-startup-defer-use-package-performance/): As an Emacs user, your configuration can easily grow from a few lightweight adjustments to a massive, hundred-package IDE. Without careful management, Emacs startup time can degrade from sub-second execution to several seconds, or minutes, in the worst cases. Eager package loading is one common source of startup overhead. This guide explains how Emacs loads libraries, how use-package configures package loading, and how deferred loading can reduce startup time.
+
+- [Emacs: Preventing Org-Mode formatting bleed when copy-pasting](https://www.jamescherti.com/emacs-fix-org-mode-copy-paste-yank-bleed/): Copying text from an Org buffer often results in unwanted colors, backgrounds, or text weights bleeding into the destination buffer. By default, vanilla Emacs preserves explicit text formatting (`face` properties) when copying and pasting to support rich-text environments. While standard syntax highlighting (`font-lock-face`) is automatically stripped, modes like `org-mode` rely heavily on the `face` property for their visual styling.
+
+- [Why Your Emacs Terminal is Slow and the Configuration to Fix It (vterm, eat, ghostel, term, and ansi-term)](https://www.jamescherti.com/emacs-terminal-performance-vterm-eat-ansi-term-ghostel/): Emacs terminal buffers like eat, vterm, ghostel, term, and ansi-term can become slow when processing large volumes of standard output. Watching Emacs freeze while a build script dumps thousands of lines is frustrating, but terminal latency is not an unavoidable cost of living inside Emacs. Applying a few targeted configuration changes will eliminate scroll lag and restore immediate responsiveness. This article provides a configuration that speed up terminal buffers...
+
+- [Measuring Emacs Startup Time More Accurately Than the Built-in emacs-init-time Function](https://www.jamescherti.com/measuring-emacs-startup-time/): As an Emacs configuration grows, startup time can gradually increase. Measuring that increase accurately makes it easier to identify regressions. However, the built-in emacs-init-time function does not measure the entire startup sequence.
+
+- [A Technical Guide to Compiling Emacs for Performance on Linux and Unix systems](https://www.jamescherti.com/compiling-emacs/): Most Linux distributions ship generic binaries compiled to run safely on a vast array of older hardware configurations. While this ensures broad compatibility, it sacrifices the speed that comes from using the specific, modern instruction sets of your processor. Compiling Emacs directly from source allows instructing the compiler to generate machine code targeted at your CPU architecture, resulting in a faster and more efficient runtime environment. Beyond raw hardware optimization, building from source enables dropping decades of legacy compatibility layers and embracing modern desktop technologies. For example, Wayland users can configure the build to bypass old X11 display protocols in favor of a Wayland environment, ensuring smoother rendering and better system integration...
+
+- [Is Emacs slow on files with very long lines? Here is how to fix it (e.g, minified JavaScript or CSS, SQL dumps, large JSON files...)](https://www.jamescherti.com/prevent-emacs-freeze-so-long-files-very-long-lines/): Emacs can slow down when opening files with exceptionally long lines, such as minified JavaScript or CSS, SQL dumps, or large JSON files. One solution to prevent these files from slowing down Emacs is to use the built-in global-so-long-mode (or so-long-mode). When you visit such files, this mode detects abnormally long lines and automatically disables expensive minor modes that could slow down or, in the worst cases, freeze Emacs. Below is a configuration to improve how global-so-long-mode handles these files, balancing performance and usability.
+
+### Emacs Security
+
+- [Securing and reducing prompts for Emacs .dir-locals.el and local variables](https://www.jamescherti.com/securing-emacs-dir-locals-el-local-variables/): Emacs automatically applies project-specific configurations through file-local and directory-local (.dir-locals.el) variables when opening a file or directory. While this feature ensures consistent settings across environments, it can cause security risks and persistent prompt fatigue when editing source code. Malicious .dir-locals.el files or file-local variables containing eval forms can execute arbitrary Lisp code if Emacs is configured to evaluate them, or if the user approves the relevant prompt by mistake. This article outlines configurations for securing file-local and directory-local variables while reducing prompts.
+
+- [The Emacs security settings that might silently compromise your system](https://www.jamescherti.com/emacs-security-settings/): Emacs ships with default settings intended for backward compatibility and convenience over strict security. The following settings enforce TLS certificate verification, reduce unintended ffap network lookups, restrict the evaluation of potentially unsafe local file, and directory variables, automated package review system, and protect authentication credentials stored by Emacs.
 
 ### Minimal-emacs.d configurations from users
 

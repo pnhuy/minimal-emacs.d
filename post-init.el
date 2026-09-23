@@ -28,11 +28,43 @@
 (with-eval-after-load 'project
   (setq project-read-file-name-function #'my-project-read-file-name))
 
-;; Copy from line above.
-(global-set-key (kbd "M-<up>") #'copy-from-above-command)
+;; Copy from line above
+(global-set-key (kbd "C-M-=") #'copy-from-above-command)
+
+(use-package drag-stuff
+  :ensure t
+  :diminish
+  :config
+  (drag-stuff-define-keys)
+  (drag-stuff-global-mode 1))
 
 ;; Enable delete-selection-mode
 (delete-selection-mode 1)
+
+;;; ----------------------------------------------------------------------
+;;; Tab Line (VS Code-style buffer tabs)
+;;; ----------------------------------------------------------------------
+
+(use-package tab-line
+  :ensure nil
+  :init
+  (global-tab-line-mode 1)
+  :custom
+  (tab-line-tabs-function #'tab-line-tabs-fixed-window-buffers)
+  (tab-line-tab-name-function #'tab-line-tab-name-truncated-buffer)
+  (tab-line-tab-name-truncated-max 30)
+  (tab-line-new-button-show nil)
+  (tab-line-close-button-show t)
+  (tab-line-close-tab-function 'kill-buffer)
+  (tab-line-exclude-buffers '(derived-mode . dired-sidebar-mode))
+
+  :bind
+  (("C-<prior>" . tab-line-switch-to-prev-tab)
+   ("C-<next>"  . tab-line-switch-to-next-tab))
+  :config
+  (with-eval-after-load 'evil
+    (define-key evil-normal-state-map "gt" #'tab-line-switch-to-next-tab)
+    (define-key evil-normal-state-map "gT" #'tab-line-switch-to-prev-tab)))
 
 (use-package undo-tree
   :ensure t

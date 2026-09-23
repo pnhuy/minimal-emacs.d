@@ -716,12 +716,33 @@
    ([remap delete-backward-char]
     . smart-hungry-delete-backward-char)
    ([remap delete-char]
+    . smart-hungry-delete-forward-char)
+   ([remap c-electric-backspace]
+    . smart-hungry-delete-backward-char)
+   ([remap cperl-electric-backspace]
+    . smart-hungry-delete-backward-char)
+   ([remap python-indent-dedent-line-backspace]
+    . smart-hungry-delete-backward-char)
+   ([remap c-electric-delete-forward]
     . smart-hungry-delete-forward-char))
 
   :init
   (smart-hungry-delete-add-default-hooks)
 
   :config
+  (dolist (mode '(c-mode c++-mode java-mode objc-mode
+                  awk-mode idl-mode pike-mode
+                  c-ts-mode c++-ts-mode java-ts-mode))
+    (add-to-list 'smart-hungry-delete-major-mode-dedent-function-alist
+                 `(,mode . (lambda () (interactive)
+                             (c-electric-backspace 1)))))
+  (add-to-list 'smart-hungry-delete-major-mode-dedent-function-alist
+               '(cperl-mode . (lambda () (interactive)
+                                (cperl-electric-backspace 1))))
+  (add-to-list 'smart-hungry-delete-major-mode-dedent-function-alist
+               '(python-ts-mode . (lambda () (interactive)
+                                    (python-indent-dedent-line-backspace nil))))
+
   ;; Extra bindings only when Evil is available
   (with-eval-after-load 'evil
     (define-key evil-insert-state-map

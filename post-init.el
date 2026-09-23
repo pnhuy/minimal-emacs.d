@@ -66,6 +66,29 @@
     (define-key evil-normal-state-map "gt" #'tab-line-switch-to-next-tab)
     (define-key evil-normal-state-map "gT" #'tab-line-switch-to-prev-tab)))
 
+;;; ----------------------------------------------------------------------
+;;; Line numbers
+;;; ----------------------------------------------------------------------
+(setq-default display-line-numbers-width nil   ; auto-size to the buffer
+              display-line-numbers-widen nil)  ; numbers follow narrowing
+(global-display-line-numbers-mode 1)
+(dolist (hook '(dired-mode-hook
+                dired-sidebar-mode-hook
+                term-mode-hook
+                shell-mode-hook
+                eshell-mode-hook
+                vterm-mode-hook
+                help-mode-hook
+                completion-list-mode-hook
+                compilation-mode-hook
+                org-mode-hook
+                pdf-view-mode-hook))
+  (add-hook hook (lambda () (display-line-numbers-mode -1))))
+
+;;; ----------------------------------------------------------------------
+;;; Undo Tree
+;;; ----------------------------------------------------------------------
+
 (use-package undo-tree
   :ensure t
   :diminish

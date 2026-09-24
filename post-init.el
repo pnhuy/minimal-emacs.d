@@ -3,7 +3,7 @@
 ;;; ----------------------------------------------------------------------
 ;;; Core
 ;;; ----------------------------------------------------------------------
-(setq auth-sources (list "~/.authinfo"))
+(setq auth-sources '("~/.authinfo.gpg" "~/.authinfo"))
 (add-to-list 'load-path (expand-file-name "lisp" user-emacs-directory))
 
 (load-theme 'modus-operandi-tinted t)
@@ -17,6 +17,12 @@
 
 ;; Automatically reload buffers when files change on disk.
 (global-auto-revert-mode 1)
+
+;; Track recently opened files (feeds `consult-recent-file' on C-x C-r).
+(recentf-mode 1)
+
+;; Remember point position when reopening files.
+(save-place-mode 1)
 
 ;; Emacs 30.2's project file reader fails when a project has no files.
 (defun my-project-read-file-name (prompt files &optional predicate hist mb-default)
@@ -294,7 +300,8 @@
 
 (use-package eglot
   :ensure nil
-
+  :hook
+  (prog-mode . eglot-ensure)
   :bind
   (:map eglot-mode-map
         ("C-c l a" . eglot-code-actions)
@@ -398,7 +405,7 @@
   (prog-mode . my/enable-hideshow)
   :bind
   (:map hs-minor-mode-map
-        ("C-c f t" . hs-toggle-hiding)
+        ("C-c f f" . hs-toggle-hiding)
         ("C-c f h" . hs-hide-block)
         ("C-c f s" . hs-show-block)
         ("C-c f H" . hs-hide-all)
@@ -406,6 +413,8 @@
         ("C-c f l" . hs-hide-level))
   :custom
   (hs-hide-comments-when-hiding-all nil)
+  (hs-show-indicators t)
+  (hs-display-lines-hidden t)
   :config
   ;; Fold Dart classes and methods delimited by braces.
   (add-to-list 'hs-special-modes-alist
@@ -685,10 +694,15 @@
 
 ;; Sidebar
 (use-package dired-subtree
+  :ensure t
   :commands (dired-subtree-toggle dired-subtree-cycle)
   :config
   (setq dired-subtree-line-prefix " ")
   (setq dired-subtree-use-backgrounds nil))
+
+;; Icon set required by `dired-sidebar-theme' `vscode'.
+(use-package vscode-icon
+  :ensure t)
 
 (use-package dired-sidebar
   :bind (("C-x C-n" . dired-sidebar-toggle-sidebar))

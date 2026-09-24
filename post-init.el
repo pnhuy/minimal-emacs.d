@@ -831,6 +831,11 @@
     :ensure nil
     :hook (prog-mode . electric-pair-local-mode))
 
+
+(use-package surround
+  :ensure t
+  :bind-keymap ("M-'" . surround-keymap))
+
 (provide 'post-init)
 
 ;;; post-init.el ends here

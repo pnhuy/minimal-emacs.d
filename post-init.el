@@ -312,8 +312,9 @@
   :custom
 
   ;; Disable LSP inlay hints.
+  ;; Disable on-type formatting
   (eglot-ignored-server-capabilities
-   '(:inlayHintProvider))
+   '(:inlayHintProvider :documentOnTypeFormattingProvider))
 
   :config
 
@@ -432,10 +433,9 @@
   "\\.dart\\'"
 
   :hook
-  (dart-mode . eglot-ensure)
+  (dart-mode . eglot-ensure))
 
-  :custom
-  (dart-format-on-save t))
+;; Dart formatting is handled by Apheleia (see the Formatting section below).
 
 
 ;;; ----------------------------------------------------------------------
@@ -702,7 +702,8 @@
 
 ;; Icon set required by `dired-sidebar-theme' `vscode'.
 (use-package vscode-icon
-  :ensure t)
+  :ensure t
+  :defer t)
 
 (use-package dired-sidebar
   :bind (("C-x C-n" . dired-sidebar-toggle-sidebar))
@@ -723,10 +724,13 @@
   (setq dired-sidebar-use-custom-font t))
 
 (use-package transient
-  :ensure t)
+  :ensure t
+  :defer t)
 
 (use-package gptel
   :ensure t
+  ;; Defer so gptel (and its llm/plz dependencies) does not load at startup.
+  :defer t
   :config
   (gptel-make-ollama
          "Ollama"
@@ -762,19 +766,20 @@
                       :inherit nil))
 
 (use-package gptel-agent
-  :ensure (:wait t)
+  :ensure t
+  :defer t
   :after gptel
   :config
   (gptel-agent-update))
 
 (use-package ghostel
-  :ensure t)
+  :ensure t
+  :defer t)
 
 (use-package markdown-mode
-  :ensure t)
-
-(use-package evil
-  :ensure t)
+  :ensure t
+  ;; `.md' files open via the autoloaded major mode.
+  :defer t)
 
 (use-package smart-hungry-delete
   :ensure t
@@ -825,7 +830,8 @@
                 #'smart-hungry-delete-forward-char)))
 
 (use-package quickrun
-  :ensure t)
+  :ensure t
+  :defer t)
 
 (use-package elec-pair
     :ensure nil
@@ -835,6 +841,37 @@
 (use-package surround
   :ensure t
   :bind-keymap ("M-'" . surround-keymap))
+
+;;; ----------------------------------------------------------------------
+;;; Formatting: Apheleia (format-on-save)
+;;; ----------------------------------------------------------------------
+
+(use-package apheleia
+  :ensure t
+  :init
+  (apheleia-global-mode 1)
+  :config
+  ;; Apheleia owns Dart formatting (replaces the removed dart-format-on-save).
+  (setf (alist-get 'dart-format apheleia-formatters) '("dart" "format"))
+  (setf (alist-get 'dart-mode apheleia-mode-alist) 'dart-format))
+
+
+
+(use-package nerd-icons
+  :ensure t
+  :defer t)
+
+(use-package nerd-icons-completion
+  :ensure t
+  :after marginalia
+  :config
+  (nerd-icons-completion-mode 1)
+  (add-hook 'marginalia-mode-hook #'nerd-icons-completion-marginalia-setup))
+
+(use-package nerd-icons-dired
+  :ensure t
+  :hook (dired-mode . nerd-icons-dired-mode))
+
 
 (provide 'post-init)
 

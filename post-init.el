@@ -44,10 +44,11 @@
 
 (use-package drag-stuff
   :ensure t
-  :diminish
-  :config
-  (drag-stuff-define-keys)
-  (drag-stuff-global-mode 1))
+  ;; Vertical only: `drag-stuff-define-keys' would also take M-<left>/M-<right>
+  ;; (Cmd-left/right) for sideways dragging.
+  :bind
+  (("M-<up>"   . drag-stuff-up)
+   ("M-<down>" . drag-stuff-down)))
 
 ;; Enable delete-selection-mode
 (delete-selection-mode 1)
@@ -103,7 +104,9 @@
   :ensure t
   :bind
   (("C-/" . undo-fu-only-undo)
-   ("C-?" . undo-fu-only-redo)))
+   ("C-_" . undo-fu-only-undo)          ; what C-/ sends in a terminal
+   ("C-?" . undo-fu-only-redo)
+   ("M-_" . undo-fu-only-redo)))        ; C-? can't be typed in a terminal
 
 (use-package undo-fu-session
   :ensure t
@@ -116,7 +119,6 @@
 
 (use-package which-key
   :ensure nil                           ; built in since Emacs 30
-  :diminish
   :init
   (which-key-mode 1))
 
@@ -328,7 +330,8 @@ Function contacts (e.g. `eglot-alternatives') are assumed available."
         ("C-c l a" . eglot-code-actions)
         ("C-c l r" . eglot-rename)
         ("C-c l f" . eglot-format-buffer)
-        ("C-c l d" . eldoc-doc-buffer))
+        ("C-c l d" . eldoc-doc-buffer)
+        ("C-c l s" . consult-eglot-symbols))
 
   :custom
 
@@ -944,10 +947,9 @@ lines up again."
          ([remap describe-key] . helpful-key)))
 
 (use-package consult-eglot
+  ;; Bound to C-c l s in `eglot-mode-map' (see the Eglot section).
   :ensure t
-  :defer t
-  :commands consult-eglot-symbols
-  :after (consult eglot))
+  :defer t)
 
 ;;; ----------------------------------------------------------------------
 ;;; Org extras
@@ -962,11 +964,13 @@ lines up again."
 
 (use-package org-download
   :ensure t
-  :after org
+  ;; No `:after org': `org-download-enable' is autoloaded, and waiting for
+  ;; Org skipped dired buffers opened before Org loaded.
   :hook (dired-mode . org-download-enable)
   :custom
-  ;; emacs user folder for org-roam images
-  (org-download-image-dir (expand-file-name "org-images" user-emacs-directory)))
+  ;; Temporary location: the OS may clear it, so don't keep images here.
+  (org-download-image-dir
+   (expand-file-name "org-download/" temporary-file-directory)))
 
 (use-package org-roam-ui
   :ensure t
@@ -1001,7 +1005,7 @@ lines up again."
   :ensure t
   :hook (dired-mode . nerd-icons-dired-mode))
 
-;; `minions' replaces the terse `diminish' output on the mode line.
+;; `minions' folds all minor modes into one mode-line menu (no diminish needed).
 (use-package minions
   :ensure t
   :config
@@ -1012,14 +1016,14 @@ lines up again."
   :init
   (setq popper-reference-buffers
         '("\\*Messages\\*"
-          "\\*Compilation\\*"
           "\\*gptel.*"
           help-mode
           compilation-mode))
   (popper-mode 1)
   (popper-echo-mode 1)
   :bind (("C-`" . popper-toggle)
-         ("C-<tab>" . popper-cycle)))
+         ;; Not C-<tab>: Org and Magit bind it locally.
+         ("C-M-`" . popper-cycle)))
 
 
 ;;; ----------------------------------------------------------------------

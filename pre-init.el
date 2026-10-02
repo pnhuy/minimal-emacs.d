@@ -46,7 +46,4 @@
 (elpaca (elpaca-use-package :wait t)
   (elpaca-use-package-mode))
 
-;; Used by the :diminish keyword in existing declarations.
-(elpaca (diminish :wait t))
-
 ;;; pre-init.el ends here

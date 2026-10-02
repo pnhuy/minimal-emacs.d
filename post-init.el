@@ -328,6 +328,7 @@ Function contacts (e.g. `eglot-alternatives') are assumed available."
   :bind
   (:map eglot-mode-map
         ("C-c l a" . eglot-code-actions)
+        ("C-c l e" . consult-flymake)
         ("C-c l r" . eglot-rename)
         ("C-c l f" . eglot-format-buffer)
         ("C-c l d" . eldoc-doc-buffer)
@@ -859,7 +860,21 @@ lines up again."
 
 (use-package quickrun
   :ensure t
-  :defer t)
+  :defer t
+  :bind
+  (("C-c r" . quickrun)                 ; compile + run the current file
+   ("C-c R" . quickrun-shell))          ; same, in a shell (for stdin input)
+  :config
+  ;; macOS has no `python' on the default PATH, only `python3'.
+  (quickrun-add-command "python" '((:command . "python3")) :override t))
+
+;; Project builds.  `compilation-scroll-output' and ANSI colors are already
+;; set up by init.el.
+(use-package compile
+  :ensure nil
+  :bind
+  (("C-c c" . compile)
+   ("C-c C" . recompile)))
 
 (use-package elec-pair
     :ensure nil

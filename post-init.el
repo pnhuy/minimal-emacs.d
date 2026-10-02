@@ -8,6 +8,11 @@
 
 (load-theme 'modus-operandi-tinted t)
 
+;; macOS: Command is Meta, Option is Super.
+(when (eq system-type 'darwin)
+  (setq mac-command-modifier 'meta
+        mac-option-modifier 'super))
+
 ;; Font: keep the default when JetBrains Mono is unavailable.
 (when (and (display-graphic-p)
            (find-font (font-spec :family "JetBrains Mono")))
@@ -66,11 +71,7 @@
 
   :bind
   (("C-<prior>" . tab-line-switch-to-prev-tab)
-   ("C-<next>"  . tab-line-switch-to-next-tab))
-  :config
-  (with-eval-after-load 'evil
-    (define-key evil-normal-state-map "gt" #'tab-line-switch-to-next-tab)
-    (define-key evil-normal-state-map "gT" #'tab-line-switch-to-prev-tab)))
+   ("C-<next>"  . tab-line-switch-to-next-tab)))
 
 ;;; ----------------------------------------------------------------------
 ;;; Line numbers
@@ -78,6 +79,9 @@
 (setq-default display-line-numbers-width nil   ; auto-size to the buffer
               display-line-numbers-widen nil)  ; numbers follow narrowing
 (global-display-line-numbers-mode 1)
+(defun my/disable-line-numbers ()
+  "Turn off line numbers in the current buffer."
+  (display-line-numbers-mode -1))
 (dolist (hook '(dired-mode-hook
                 dired-sidebar-mode-hook
                 term-mode-hook
@@ -89,33 +93,29 @@
                 compilation-mode-hook
                 org-mode-hook
                 pdf-view-mode-hook))
-  (add-hook hook (lambda () (display-line-numbers-mode -1))))
+  (add-hook hook #'my/disable-line-numbers))
 
 ;;; ----------------------------------------------------------------------
-;;; Undo Tree
+;;; Undo (undo-fu + persistent session history)
 ;;; ----------------------------------------------------------------------
 
-(use-package undo-tree
+(use-package undo-fu
   :ensure t
-  :diminish
+  :bind
+  (("C-/" . undo-fu-only-undo)
+   ("C-?" . undo-fu-only-redo)))
+
+(use-package undo-fu-session
+  :ensure t
   :init
-  (let ((history-directory
-         (expand-file-name "undo-tree-history/" user-emacs-directory)))
-    (unless (file-directory-p history-directory)
-      (with-file-modes #o700
-        (make-directory history-directory t)))
-    (setq undo-tree-history-directory-alist
-          `(("." . ,history-directory))
-          undo-tree-auto-save-history t))
-  :config
-  (global-undo-tree-mode 1))
+  (undo-fu-session-global-mode 1))
 
 ;;; ----------------------------------------------------------------------
 ;;; Which Key
 ;;; ----------------------------------------------------------------------
 
 (use-package which-key
-  :ensure t
+  :ensure nil                           ; built in since Emacs 30
   :diminish
   :init
   (which-key-mode 1))
@@ -234,13 +234,13 @@
   ;; Cycle around candidate list.
   (corfu-cycle t)
 
-  ;; Show popup even if there is only one candidate.
+  ;; Minimum popup width in characters.
   (corfu-min-width 25)
 
   ;; Keep popup reasonably sized.
   (corfu-count 12)
 
-  ;; Show current candidate position.
+  ;; Preselect the first candidate.
   (corfu-preselect 'first)
 
   :bind
@@ -262,7 +262,8 @@
 ;;; ----------------------------------------------------------------------
 
 (use-package cape
-  ;; Finish the completion package queue before startup files run prog-mode-hook.
+  ;; Wait, so `cape-capf-super' exists before startup files run
+  ;; `prog-mode-hook' (otherwise void-function on first run / updates).
   :ensure (:wait t)
   :after corfu)
 
@@ -283,13 +284,11 @@
 
 (defun my/prog-capf-setup ()
   "Configure completion sources for normal programming buffers."
-  (setq-local completion-at-point-functions
-              (list
-               (cape-capf-super
-                #'yasnippet-capf
-                #'cape-dabbrev)
-
-               #'cape-file)))
+  ;; Append rather than replace, so the major mode's own CAPF
+  ;; (e.g. `elisp-completion-at-point') keeps priority.
+  (add-hook 'completion-at-point-functions
+            (cape-capf-super #'yasnippet-capf #'cape-dabbrev) 50 t)
+  (add-hook 'completion-at-point-functions #'cape-file 60 t))
 
 (add-hook 'prog-mode-hook #'my/prog-capf-setup)
 
@@ -301,7 +300,29 @@
 (use-package eglot
   :ensure nil
   :hook
-  (prog-mode . eglot-ensure)
+  (prog-mode . my/eglot-ensure-maybe)
+  :init
+  (defun my/eglot-server-available-p ()
+    "Non-nil if `eglot-server-programs' has an installed server for this mode.
+Function contacts (e.g. `eglot-alternatives') are assumed available."
+    (require 'eglot)
+    (seq-some
+     (lambda (entry)
+       (and (seq-some (lambda (m)
+                        (and (symbolp m) (not (keywordp m))
+                             (provided-mode-derived-p major-mode m)))
+                      (flatten-tree (car entry)))
+            (let ((contact (cdr entry)))
+              (or (functionp contact)
+                  (not (stringp (car-safe contact)))
+                  (executable-find (car contact))))))
+     eglot-server-programs))
+
+  (defun my/eglot-ensure-maybe ()
+    "Start Eglot only when a language server is available, to avoid
+\"Couldn't guess LSP server\" warnings in other buffers."
+    (when (my/eglot-server-available-p)
+      (eglot-ensure)))
   :bind
   (:map eglot-mode-map
         ("C-c l a" . eglot-code-actions)
@@ -315,6 +336,17 @@
   ;; Disable on-type formatting
   (eglot-ignored-server-capabilities
    '(:inlayHintProvider :documentOnTypeFormattingProvider))
+
+  ;; Show code-action hints in the fringe only.  The default also includes
+  ;; `eldoc-hint', which makes eldoc-box pop up with just the action hint
+  ;; even when there is no documentation at point.
+  (eglot-code-action-indications '(left-fringe))
+
+  ;; Shut the server down when its last buffer is killed.
+  (eglot-autoshutdown t)
+
+  ;; Don't log every JSON-RPC message; large logs slow Eglot down.
+  (eglot-events-buffer-config '(:size 0 :format full))
 
   :config
 
@@ -333,34 +365,27 @@
 ;;; ----------------------------------------------------------------------
 ;;; Eglot + Corfu completion
 ;;;
-;;; THIS IS THE IMPORTANT PART.
-;;;
-;;; Corfu will receive one combined completion table containing:
-;;;
-;;;     Eglot / LSP
-;;;     Yasnippet
-;;;     dabbrev
-;;;
-;;; cape-file is left as a secondary CAPF because file completion
-;;; generally has different completion boundaries.
+;;; In Eglot buffers Corfu gets one combined table of Eglot/LSP and
+;;; Yasnippet candidates.  The `my/prog-capf-setup' sources (snippets +
+;;; dabbrev, then cape-file) stay behind it as fallbacks.
 ;;; ----------------------------------------------------------------------
 
+(defvar-local my/eglot-capf nil
+  "Combined Eglot CAPF installed in the current buffer.")
+
 (defun my/eglot-capf-setup ()
-  "Combine Eglot, snippets and dabbrev into one Corfu candidate list."
+  "Put Eglot and snippets into one Corfu list; undo when Eglot stops."
+  (when my/eglot-capf
+    (remove-hook 'completion-at-point-functions my/eglot-capf t)
+    (setq my/eglot-capf nil))
+  (when (eglot-managed-p)
+    (setq my/eglot-capf
+          (cape-capf-super #'eglot-completion-at-point #'yasnippet-capf))
+    ;; Replace Eglot's own plain CAPF with the combined one.
+    (remove-hook 'completion-at-point-functions #'eglot-completion-at-point t)
+    (add-hook 'completion-at-point-functions my/eglot-capf -10 t)))
 
-  (setq-local completion-at-point-functions
-              (list
-               ;; Combined source.
-               (cape-capf-super
-                #'eglot-completion-at-point
-                #'yasnippet-capf
-                #'cape-dabbrev)
-
-               ;; File completion fallback.
-               #'cape-file)))
-
-(add-hook 'eglot-managed-mode-hook
-          #'my/eglot-capf-setup)
+(add-hook 'eglot-managed-mode-hook #'my/eglot-capf-setup)
 
 
 ;;; ----------------------------------------------------------------------
@@ -429,11 +454,9 @@
 (use-package dart-mode
   :ensure t
 
+  ;; Eglot starts via the `prog-mode' hook in the Eglot section.
   :mode
-  "\\.dart\\'"
-
-  :hook
-  (dart-mode . eglot-ensure))
+  "\\.dart\\'")
 
 ;; Dart formatting is handled by Apheleia (see the Formatting section below).
 
@@ -447,15 +470,10 @@
   :ensure (org :repo "https://code.tecosaur.net/tec/org-mode.git/"
                 :branch "dev")
   :custom
-  (org-indent-mode 1)
   (org-startup-truncated nil)
   (org-preview-latex-default-process 'dvisvgm)
-  (org-preview-latex-image-directory "/tmp/ltximg/")
   (org-agenda-files
-   '("~/Dropbox/Documents/org-roam/20250805110520-backlog.org"))
-  :config
-  ;; enable org-indent-mode for all org buffers
-  (add-hook 'org-mode-hook #'org-indent-mode))
+   '("~/Dropbox/Documents/org-roam/20250805110520-backlog.org")))
 
 (use-package org-fragtog
   :ensure t
@@ -473,7 +491,7 @@
   :hook
   (org-mode . org-modern-indent-mode))
 
-(with-eval-after-load 'org       
+(with-eval-after-load 'org
   (setq org-startup-indented t) ; Enable `org-indent-mode' by default
   (add-hook 'org-mode-hook #'visual-line-mode))
 
@@ -488,37 +506,21 @@
   (org-latex-preview '(16)))
 
 (defun my/org-increase-latex-preview-size ()
-  "Increase LaTeX preview size and regenerate all previews."
+  "Increase LaTeX preview size by 0.1 and regenerate all previews."
   (interactive)
-  (unless (derived-mode-p 'org-mode)
-    (user-error "This command only works in Org mode"))
-  ;; Make the setting local to this Org buffer.
-  (unless (local-variable-p 'org-format-latex-options)
-    (setq-local org-format-latex-options
-                (copy-tree org-format-latex-options)))
-  (let* ((current (or (plist-get org-format-latex-options :scale) 1.0))
-         (new (/ (float (round (* 10 (+ current 0.1)))) 10)))
-    (setq org-format-latex-options
-          (plist-put org-format-latex-options :scale new))
-    (my/org-regenerate-all-latex-previews)
-    (message "LaTeX preview scale: %.1f" new)))
+  (my/org-set-latex-preview-size
+   (/ (round (* 10 (+ (or (plist-get org-format-latex-options :scale) 1.0)
+                      0.1)))
+      10.0)))
 
 (defun my/org-decrease-latex-preview-size ()
-  "Decrease LaTeX preview size and regenerate all previews."
+  "Decrease LaTeX preview size by 0.1 and regenerate all previews."
   (interactive)
-  (unless (derived-mode-p 'org-mode)
-    (user-error "This command only works in Org mode"))
-  ;; Make the setting local to this Org buffer.
-  (unless (local-variable-p 'org-format-latex-options)
-    (setq-local org-format-latex-options
-                (copy-tree org-format-latex-options)))
-  (let* ((current (or (plist-get org-format-latex-options :scale) 1.0))
-         (new (max 0.1
-                   (/ (float (round (* 10 (- current 0.1)))) 10))))
-    (setq org-format-latex-options
-          (plist-put org-format-latex-options :scale new))
-    (my/org-regenerate-all-latex-previews)
-    (message "LaTeX preview scale: %.1f" new)))
+  (my/org-set-latex-preview-size
+   (max 0.1
+        (/ (round (* 10 (- (or (plist-get org-format-latex-options :scale) 1.0)
+                           0.1)))
+           10.0))))
 
 (defun my/org-set-latex-preview-size (scale)
   "Set LaTeX preview SCALE for the current buffer and regenerate previews."
@@ -542,8 +544,6 @@
 
   (my/org-regenerate-all-latex-previews)
   (message "LaTeX preview scale: %.2f" scale))
-
-(require 'face-remap)
 
 (defvar-local my/org-font-remap-cookie nil
   "Face-remapping cookie for the current Org buffer.")
@@ -652,7 +652,7 @@
   :ensure t
 
   :hook
-  (eglot-managed-mode . eldoc-box-hover-mode)
+  (eglot-managed-mode . eldoc-box-hover-at-point-mode)
 
   :custom
   (eldoc-box-mouse-mode-idle-delay 1)
@@ -666,10 +666,9 @@
 
 (use-package pyvenv
   :ensure t
-
-  :config
-  (pyvenv-mode 1)
-  (pyvenv-tracking-mode 1))
+  :hook
+  (python-base-mode . pyvenv-mode)
+  (python-base-mode . pyvenv-tracking-mode))
 
 
 ;;; ----------------------------------------------------------------------
@@ -690,6 +689,25 @@
   (super-save-idle-duration 10)
   (super-save-remote-files nil)
   :config
+  ;; Don't run Apheleia on idle autosaves, which would reformat half-typed
+  ;; code.  Explicit saves (C-x C-s) still format.
+  (defvar my/super-save-idle-in-progress nil
+    "Non-nil while super-save's idle timer is saving buffers.")
+
+  (defun my/super-save-mark-idle (fn &rest args)
+    "Call FN with ARGS while flagging the save as an idle autosave."
+    (let ((my/super-save-idle-in-progress t))
+      (apply fn args)))
+
+  (advice-add 'super-save-command-idle :around #'my/super-save-mark-idle)
+
+  (defun my/super-save-idle-p ()
+    "Non-nil during an idle autosave; used by `apheleia-skip-functions'."
+    my/super-save-idle-in-progress)
+
+  (with-eval-after-load 'apheleia
+    (add-hook 'apheleia-skip-functions #'my/super-save-idle-p))
+
   (super-save-mode 1))
 
 ;; Sidebar
@@ -804,30 +822,37 @@
   (smart-hungry-delete-add-default-hooks)
 
   :config
-  (dolist (mode '(c-mode c++-mode java-mode objc-mode
-                  awk-mode idl-mode pike-mode
-                  c-ts-mode c++-ts-mode java-ts-mode))
-    (add-to-list 'smart-hungry-delete-major-mode-dedent-function-alist
-                 `(,mode . (lambda () (interactive)
-                             (c-electric-backspace 1)))))
-  (add-to-list 'smart-hungry-delete-major-mode-dedent-function-alist
-               '(cperl-mode . (lambda () (interactive)
-                                (cperl-electric-backspace 1))))
-  (add-to-list 'smart-hungry-delete-major-mode-dedent-function-alist
-               '(python-ts-mode . (lambda () (interactive)
-                                    (python-indent-dedent-line-backspace nil))))
+  ;; Dedent one level when DEL is pressed inside the indentation.
+  ;; Self-contained, so it does not depend on cc-mode's electric commands
+  ;; (which are hungry-delete and only delete one char with a numeric prefix).
+  (defun my/indent-step ()
+    "Return the indentation step of the current major mode.
+Not `tab-width': `python-mode' sets that to 8 while indenting by 4."
+    (let ((step (cond ((derived-mode-p 'python-base-mode) python-indent-offset)
+                      ((derived-mode-p 'c-ts-base-mode) c-ts-mode-indent-offset)
+                      ((derived-mode-p 'java-ts-mode) java-ts-mode-indent-offset)
+                      ((derived-mode-p 'cperl-mode) cperl-indent-level)
+                      ;; cc-mode modes don't derive from `c-mode-common'.
+                      ((bound-and-true-p c-buffer-is-cc-mode) c-basic-offset))))
+      (if (and (integerp step) (> step 0)) step tab-width)))
 
-  ;; Extra bindings only when Evil is available
-  (with-eval-after-load 'evil
-    (define-key evil-insert-state-map
-                (kbd "DEL")
-                #'smart-hungry-delete-backward-char)
-    (define-key evil-insert-state-map
-                (kbd "<backspace>")
-                #'smart-hungry-delete-backward-char)
-    (define-key evil-insert-state-map
-                (kbd "<delete>")
-                #'smart-hungry-delete-forward-char)))
+  (defun my/dedent-line-backspace ()
+    "Dedent the current line by one indentation level; else delete one char.
+Snaps to the previous multiple of the step, so uneven indentation
+lines up again."
+    (interactive)
+    (let ((indent (current-indentation)))
+      ;; At column 0, delete the newline (join lines) as usual.
+      (if (and (> indent 0) (not (bolp)))
+          (let ((step (my/indent-step)))
+            (indent-line-to (* step (/ (1- indent) step))))
+        (delete-backward-char 1))))
+
+  (dolist (mode '(c-mode c++-mode java-mode objc-mode awk-mode idl-mode pike-mode
+                  python-mode cperl-mode
+                  c-ts-mode c++-ts-mode java-ts-mode python-ts-mode))
+    (setf (alist-get mode smart-hungry-delete-major-mode-dedent-function-alist)
+          #'my/dedent-line-backspace)))
 
 (use-package quickrun
   :ensure t
@@ -841,6 +866,25 @@
 (use-package surround
   :ensure t
   :bind-keymap ("M-'" . surround-keymap))
+;;; ----------------------------------------------------------------------
+;;; Git: Magit + diff-hl
+;;; ----------------------------------------------------------------------
+
+(use-package magit
+  :ensure t
+  :defer t
+  :bind ("C-x g" . magit-status)
+  :custom
+  (magit-display-buffer-function
+   #'magit-display-buffer-same-window-except-diff-v1))
+
+(use-package diff-hl
+  :ensure t
+  :init
+  (global-diff-hl-mode 1)
+  :config
+  (diff-hl-flydiff-mode 1))
+
 
 ;;; ----------------------------------------------------------------------
 ;;; Formatting: Apheleia (format-on-save)
@@ -849,13 +893,95 @@
 (use-package apheleia
   :ensure t
   :init
-  (apheleia-global-mode 1)
+  ;; Dart uses Apheleia's built-in `dart-format' (dart format).
+  (apheleia-global-mode 1))
+
+
+;;; ----------------------------------------------------------------------
+;;; Ligatures (gear: JetBrains Mono)
+;;; ----------------------------------------------------------------------
+
+(use-package ligature
+  :ensure t
   :config
-  ;; Apheleia owns Dart formatting (replaces the removed dart-format-on-save).
-  (setf (alist-get 'dart-format apheleia-formatters) '("dart" "format"))
-  (setf (alist-get 'dart-mode apheleia-mode-alist) 'dart-format))
+  (ligature-set-ligatures
+   'prog-mode
+   '("->" "=>" "==" "!=" ">=" "<=" "&&" "||" "::" "..." "<-" "-->" "<=>" "www"))
+  (global-ligature-mode t))
 
 
+;;; ----------------------------------------------------------------------
+;;; Editing helpers
+;;; ----------------------------------------------------------------------
+
+(use-package ws-butler
+  :ensure t
+  :hook (prog-mode . ws-butler-mode))
+
+(use-package avy
+  :ensure t
+  :defer t
+  :bind ("C-:" . avy-goto-char-timer))
+
+(use-package symbol-overlay
+  :ensure t
+  :defer t
+  :bind (("C-c s p" . symbol-overlay-put)
+         ("C-c s n" . symbol-overlay-jump-next)
+         ("C-c s P" . symbol-overlay-jump-prev)))
+
+(use-package multiple-cursors
+  :ensure t
+  :defer t
+  :bind (("C-c m l" . mc/edit-lines)
+         ("C-c m d" . mc/mark-next-like-this)))
+
+(use-package helpful
+  :ensure t
+  :defer t
+  :bind (([remap describe-function] . helpful-callable)
+         ([remap describe-variable] . helpful-variable)
+         ([remap describe-key] . helpful-key)))
+
+(use-package consult-eglot
+  :ensure t
+  :defer t
+  :commands consult-eglot-symbols
+  :after (consult eglot))
+
+;;; ----------------------------------------------------------------------
+;;; Org extras
+;;; ----------------------------------------------------------------------
+
+(use-package org-appear
+  :ensure t
+  :hook (org-mode . org-appear-mode)
+  :custom
+  (org-appear-autolinks t)
+  (org-appear-autoemphasis t))
+
+(use-package org-download
+  :ensure t
+  :after org
+  :hook (dired-mode . org-download-enable)
+  :custom
+  ;; emacs user folder for org-roam images
+  (org-download-image-dir (expand-file-name "org-images" user-emacs-directory)))
+
+(use-package org-roam-ui
+  :ensure t
+  :defer t
+  :after org-roam
+  :bind ("C-c n U" . org-roam-ui-mode)
+  :custom
+  (org-roam-ui-sync-theme t)
+  (org-roam-ui-follow t)
+  (org-roam-ui-update-on-save t))
+
+
+;;; ----------------------------------------------------------------------
+;;; Icons and UI polish
+;;; ----------------------------------------------------------------------
 
 (use-package nerd-icons
   :ensure t
@@ -864,14 +990,45 @@
 (use-package nerd-icons-completion
   :ensure t
   :after marginalia
+  :hook
+  (marginalia-mode . nerd-icons-completion-marginalia-setup)
   :config
   (nerd-icons-completion-mode 1)
-  (add-hook 'marginalia-mode-hook #'nerd-icons-completion-marginalia-setup))
+  ;; `marginalia-mode' is usually on already, so run the setup now too.
+  (nerd-icons-completion-marginalia-setup))
 
 (use-package nerd-icons-dired
   :ensure t
   :hook (dired-mode . nerd-icons-dired-mode))
 
+;; `minions' replaces the terse `diminish' output on the mode line.
+(use-package minions
+  :ensure t
+  :config
+  (minions-mode 1))
+
+(use-package popper
+  :ensure t
+  :init
+  (setq popper-reference-buffers
+        '("\\*Messages\\*"
+          "\\*Compilation\\*"
+          "\\*gptel.*"
+          help-mode
+          compilation-mode))
+  (popper-mode 1)
+  (popper-echo-mode 1)
+  :bind (("C-`" . popper-toggle)
+         ("C-<tab>" . popper-cycle)))
+
+
+;;; ----------------------------------------------------------------------
+;;; Debugging (DAP) and terminal
+;;; ----------------------------------------------------------------------
+
+(use-package dape
+  :ensure t
+  :defer t)
 
 (provide 'post-init)
 

@@ -444,6 +444,8 @@ Function contacts (e.g. `eglot-alternatives') are assumed available."
   :custom
   (hs-hide-comments-when-hiding-all nil)
   (hs-show-indicators t)
+  ;; Keep fold arrows out of the left fringe, where dape draws breakpoints.
+  (hs-indicator-type 'margin)
   (hs-display-lines-hidden t)
   :config
   ;; Fold Dart classes and methods delimited by braces.
@@ -1045,9 +1047,31 @@ lines up again."
 ;;; Debugging (DAP) and terminal
 ;;; ----------------------------------------------------------------------
 
+;; dape only autoloads `dape' itself, so its `C-x C-a' keys and the
+;; breakpoint commands do not exist until it has loaded.  Bind the ones
+;; needed before the first session so breakpoints can be set up front.
 (use-package dape
   :ensure t
-  :defer t)
+  :defer t
+  :commands (dape dape-breakpoint-toggle dape-breakpoint-log
+             dape-breakpoint-expression dape-breakpoint-remove-all)
+  :bind
+  (("C-c d b" . dape-breakpoint-toggle)
+   ("C-c d B" . dape-breakpoint-expression))
+  ;; Highlight the line the debugger is stopped on (empty by default).
+  ;; Add `:underline t' for an underline as well.
+  :custom-face
+  (dape-source-line-face ((t :inherit highlight :extend t))))
+
+;; Run .vscode/launch.json configs: debuggable ones go through dape,
+;; plain commands (npm/npx, node-terminal) through compile.
+(use-package vscode-launch
+  :ensure nil
+  :commands (vscode-launch vscode-launch-dape vscode-launch-install-js-debug vscode-launch-install-debugpy vscode-launch-rerun vscode-launch-open-file)
+  :bind
+  (("C-c d l" . vscode-launch)
+   ("C-c d r" . vscode-launch-rerun)
+   ("C-c d o" . vscode-launch-open-file)))
 
 (provide 'post-init)
 

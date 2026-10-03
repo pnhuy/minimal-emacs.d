@@ -42,6 +42,52 @@
 ;; Copy from line above
 (global-set-key (kbd "C-M-=") #'copy-from-above-command)
 
+(use-package async
+  :ensure t
+  :commands async-start)
+
+(use-package exec-path-from-shell
+  :ensure t
+  :demand t
+  :if (memq system-type '(darwin gnu/linux))
+  :init
+  (defvar my/shell-path-cache
+    (expand-file-name "var/shell-path" user-emacs-directory)
+    "File containing the cached shell PATH.")
+
+  (defun my/apply-shell-path (path)
+    "Update PATH and executable lookup directories."
+    (setenv "PATH" path)
+    (setq exec-path
+          (append (parse-colon-path path)
+                  (list exec-directory))))
+
+  ;; Load the previous PATH immediately, without starting a shell.
+  (when (file-readable-p my/shell-path-cache)
+    (let ((path (with-temp-buffer
+                  (insert-file-contents my/shell-path-cache)
+                  (buffer-string))))
+      (when (> (length path) 0)
+        (my/apply-shell-path path))))
+
+  :config
+  ;; Refresh PATH in a separate Emacs process.
+  (async-start
+   `(lambda ()
+      (load ,(locate-library "exec-path-from-shell") nil t)
+      (setq exec-path-from-shell-variables '("PATH"))
+      (exec-path-from-shell-initialize)
+      (getenv "PATH"))
+   (lambda (path)
+     (when (and (stringp path) (> (length path) 0))
+       (my/apply-shell-path path)
+       (make-directory
+        (file-name-directory my/shell-path-cache) t)
+       (with-temp-buffer
+         (insert path)
+         (write-region (point-min) (point-max)
+                       my/shell-path-cache nil 'silent))))))
+
 (use-package drag-stuff
   :ensure t
   ;; Vertical only: `drag-stuff-define-keys' would also take M-<left>/M-<right>
@@ -1061,7 +1107,22 @@ lines up again."
   ;; Highlight the line the debugger is stopped on (empty by default).
   ;; Add `:underline t' for an underline as well.
   :custom-face
-  (dape-source-line-face ((t :inherit highlight :extend t))))
+  (dape-source-line-face ((t :inherit highlight :extend t)))
+  :config
+  ;; Launch a C/C++ executable built with debug symbols (for example, -g).
+  (setf (alist-get 'lldb-dap dape-configs)
+        '(modes (c-mode c-ts-mode c++-mode c++-ts-mode
+                 rust-mode rust-ts-mode rustic-mode)
+          ensure dape-ensure-command
+          command "lldb-dap"
+          command-cwd dape-command-cwd
+          :type "lldb-dap"
+          :request "launch"
+          :cwd dape-cwd
+          :program (lambda ()
+                     (read-file-name "Executable to debug: " (dape-cwd)
+                                     nil t))
+          :args [])))
 
 ;; Run .vscode/launch.json configs: debuggable ones go through dape,
 ;; plain commands (npm/npx, node-terminal) through compile.

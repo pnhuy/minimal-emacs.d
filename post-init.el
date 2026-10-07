@@ -6,6 +6,10 @@
 (setq auth-sources '("~/.authinfo.gpg" "~/.authinfo"))
 (add-to-list 'load-path (expand-file-name "lisp" user-emacs-directory))
 
+(use-package cookiecutter
+  :ensure nil
+  :bind ("C-c p c" . cookiecutter-create-project))
+
 (load-theme 'modus-operandi-tinted t)
 
 ;; macOS: Command is Meta, Option is Super.

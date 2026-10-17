@@ -550,6 +550,7 @@ Function contacts (e.g. `eglot-alternatives') are assumed available."
 
 (use-package org-fragtog
   :ensure t
+  :if (display-images-p)
   :hook
   (org-mode . org-fragtog-mode))
 
@@ -573,6 +574,8 @@ Function contacts (e.g. `eglot-alternatives') are assumed available."
   (interactive)
   (unless (derived-mode-p 'org-mode)
     (user-error "This command only works in Org mode"))
+  (unless (display-images-p)
+    (user-error "LaTeX previews require a display supporting images"))
   ;; Triple prefix: clear all previews.
   (org-latex-preview '(64))
   ;; Double prefix: generate all previews.
@@ -630,6 +633,9 @@ Function contacts (e.g. `eglot-alternatives') are assumed available."
 (defun my/org-change-font (font size)
   "Interactively change FONT and SIZE in the current Org buffer."
   (interactive
+   (progn
+     (unless (display-graphic-p)
+       (user-error "Change the font in your terminal emulator's settings"))
    (let* ((fonts (sort (delete-dups (font-family-list))
                        #'string-lessp))
           (current-font
@@ -644,7 +650,7 @@ Function contacts (e.g. `eglot-alternatives') are assumed available."
            (read-number
             "Org font size: "
             my/org-font-size)))
-     (list font size)))
+       (list font size))))
 
   (unless (derived-mode-p 'org-mode)
     (user-error "This command only works in Org mode"))
@@ -723,6 +729,7 @@ Function contacts (e.g. `eglot-alternatives') are assumed available."
 
 (use-package eldoc-box
   :ensure t
+  :if (display-graphic-p)
 
   :hook
   (eglot-managed-mode . eldoc-box-hover-at-point-mode)
@@ -752,7 +759,8 @@ Function contacts (e.g. `eglot-alternatives') are assumed available."
   :ensure t
 
   :bind
-  ("C-=" . er/expand-region))
+  (("C-=" . er/expand-region)
+   ("C-c e" . er/expand-region)))
 
 
 (use-package super-save
@@ -813,9 +821,9 @@ Function contacts (e.g. `eglot-alternatives') are assumed available."
   (push 'rotate-windows dired-sidebar-toggle-hidden-commands)
 
   (setq dired-sidebar-subtree-line-prefix "__")
-  (setq dired-sidebar-theme 'vscode)
+  (setq dired-sidebar-theme (if (display-graphic-p) 'vscode 'ascii))
   (setq dired-sidebar-use-term-integration t)
-  (setq dired-sidebar-use-custom-font t))
+  (setq dired-sidebar-use-custom-font (display-graphic-p)))
 
 (use-package transient
   :ensure t
@@ -1080,6 +1088,7 @@ lines up again."
 
 (use-package nerd-icons-completion
   :ensure t
+  :if (display-graphic-p)
   :after marginalia
   :hook
   (marginalia-mode . nerd-icons-completion-marginalia-setup)
@@ -1090,7 +1099,25 @@ lines up again."
 
 (use-package nerd-icons-dired
   :ensure t
+  :if (display-graphic-p)
   :hook (dired-mode . nerd-icons-dired-mode))
+
+(use-package pdf-tools
+  :ensure t
+  ;; Leave PDF handling to Emacs's built-in modes in terminal sessions.
+  :if (display-graphic-p)
+  :demand t
+  :config
+  ;; Newer Org versions define the annotation LaTeX header in this module.
+  (require 'org)
+  (unless (boundp 'org-format-latex-header)
+    (require 'org-latex-preview))
+  (pdf-tools-install :no-query)
+
+  (setq-default pdf-view-display-size 'fit-page
+                pdf-view-continuous t)
+
+  (add-to-list 'auto-mode-alist '("\\.pdf\\'" . pdf-view-mode)))
 
 ;; `minions' folds all minor modes into one mode-line menu (no diminish needed).
 (use-package minions

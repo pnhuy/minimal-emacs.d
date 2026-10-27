@@ -31,6 +31,19 @@
 ;; Automatically reload buffers when files change on disk.
 (global-auto-revert-mode 1)
 
+(use-package so-long
+  :ensure nil
+  :demand t
+  :custom
+  ;; Cursor benchmarks become slow beyond this line length (in bytes).
+  (so-long-threshold 20000)
+  :config
+  ;; Plain text is not included in the built-in target modes.
+  (add-to-list 'so-long-target-modes 'text-mode)
+  (dolist (mode '(corfu-mode ligature-mode))
+    (add-to-list 'so-long-minor-modes mode))
+  (global-so-long-mode 1))
+
 ;; Track recently opened files (feeds `consult-recent-file' on C-x C-r).
 (recentf-mode 1)
 
@@ -748,9 +761,12 @@ Function contacts (e.g. `eglot-alternatives') are assumed available."
   (super-save-auto-save-when-idle t)
   (super-save-idle-duration 10)
   (super-save-remote-files nil)
+  ;; Avoid full-buffer writes and persistent-undo hashing for large buffers.
+  ;; This setting counts characters; larger buffers are saved explicitly.
+  (super-save-max-buffer-size (* 10 1024 1024))
   :config
-  ;; Don't run Apheleia on idle autosaves, which would reformat half-typed
-  ;; code.  Explicit saves (C-x C-s) still format.
+  ;; If Apheleia is enabled locally, skip it on idle autosaves so they
+  ;; don't reformat half-typed code.
   (defvar my/super-save-idle-in-progress nil
     "Non-nil while super-save's idle timer is saving buffers.")
 

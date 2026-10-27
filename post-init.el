@@ -10,6 +10,10 @@
   :ensure nil
   :bind ("C-c p c" . cookiecutter-create-project))
 
+(use-package opengl-project
+  :ensure nil
+  :commands opengl-create-project)
+
 (load-theme 'modus-operandi-tinted t)
 
 ;; macOS: Command is Meta, Option is Super.
@@ -1092,6 +1096,18 @@ lines up again."
          ;; Not C-<tab>: Org and Magit bind it locally.
          ("C-M-`" . popper-cycle)))
 
+(use-package shader-mode
+  :ensure t
+  :defer t
+  :mode
+  ("\\.shader\\'" . shader-mode)
+  ("\\.glsl\\'" . shader-mode)
+  ("\\.vert\\'" . shader-mode)
+  ("\\.frag\\'" . shader-mode)
+  ("\\.geom\\'" . shader-mode)
+  ("\\.comp\\'" . shader-mode)
+  ("\\.tesc\\'" . shader-mode)
+  ("\\.tese\\'" . shader-mode))
 
 ;;; ----------------------------------------------------------------------
 ;;; Debugging (DAP) and terminal

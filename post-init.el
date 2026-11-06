@@ -4,6 +4,7 @@
 ;;; Core
 ;;; ----------------------------------------------------------------------
 (setq auth-sources '("~/.authinfo.gpg" "~/.authinfo"))
+(setq mark-even-if-inactive nil)
 (add-to-list 'load-path (expand-file-name "lisp" user-emacs-directory))
 
 ;; Activate the Org fork before other packages can load bundled Org.

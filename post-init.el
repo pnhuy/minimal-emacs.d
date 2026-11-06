@@ -14,7 +14,19 @@
   :ensure nil
   :commands opengl-create-project)
 
-(load-theme 'modus-operandi-tinted t)
+(use-package batppuccin
+  :ensure t
+  :config
+  (load-theme 'batppuccin-macchiato t))
+
+;; (load-theme 'modus-operandi-tinted t)
+
+;; Keep deprecated source code dimmed, without a line through the text.
+;; User face settings also survive theme changes.
+(custom-theme-set-faces
+ 'user
+ '(eglot-diagnostic-tag-deprecated-face
+   ((t (:inherit shadow :strike-through nil)))))
 
 ;; macOS: Command is Meta, Option is Super.
 (when (eq system-type 'darwin)
@@ -26,7 +38,14 @@
            (find-font (font-spec :family "JetBrains Mono")))
   (set-face-attribute 'default nil
                       :family "JetBrains Mono"
-                      :height 140))
+                      :height 160))
+
+;; Control + mouse wheel scales text across all buffers and frames.
+(with-eval-after-load 'mwheel
+  (setf (alist-get '(control) mouse-wheel-scroll-amount nil nil #'equal)
+        'global-text-scale)
+  ;; Rebuild bindings: mwheel may already have installed buffer-local zoom.
+  (mouse-wheel-mode 1))
 
 ;; Automatically reload buffers when files change on disk.
 (global-auto-revert-mode 1)
@@ -239,6 +258,7 @@
   :ensure t
   :custom
   (completion-styles '(orderless basic))
+  (orderless-matching-styles '(orderless-literal orderless-regexp orderless-flex))
   (completion-category-defaults nil)
   (completion-category-overrides
    '((file (styles partial-completion)))))
@@ -294,8 +314,8 @@
   ;; Show completion automatically.
   (corfu-auto t)
 
-  ;; Wait slightly before showing popup.
-  (corfu-auto-delay 0.15)
+  ;; Brief pause before requesting candidates.
+  (corfu-auto-delay 0.1)
 
   ;; Start after two characters.
   (corfu-auto-prefix 2)
@@ -311,6 +331,10 @@
 
   ;; Preselect the first candidate.
   (corfu-preselect 'first)
+
+  ;; Keep candidate previews from changing the displayed text at point.
+  ;; TAB still inserts the selected candidate explicitly.
+  (corfu-preview-current nil)
 
   :bind
   (:map corfu-map
@@ -444,6 +468,37 @@ Function contacts (e.g. `eglot-alternatives') are assumed available."
 (defvar-local my/eglot-capf nil
   "Combined Eglot CAPF installed in the current buffer.")
 
+(defun my/eglot-sort-completions (candidates)
+  "Prefer case-matching prefixes and shorter names in CANDIDATES.
+Keep the server's order for fuzzy matches and equally ranked names."
+  (let* ((bounds (bounds-of-thing-at-point 'symbol))
+         (prefix (if bounds
+                     (buffer-substring-no-properties (car bounds) (point))
+                   ""))
+         (ranked
+          (mapcar
+           (lambda (candidate)
+             ;; LSP labels can include a bullet and a full signature.  Rank
+             ;; the actual symbol name rather than that display text.
+             (let* ((item (get-text-property 0 'eglot--lsp-item candidate))
+                    (name (or (plist-get item :filterText)
+                              (car (split-string
+                                    (string-trim-left candidate "[ •]+") "("))
+                              candidate))
+                    (rank (cond ((string-prefix-p prefix name) 0)
+                                ((string-prefix-p prefix name t) 1)
+                                (t 2))))
+               (list candidate rank (length name))))
+           candidates)))
+    (mapcar #'car
+            (cl-stable-sort
+             ranked
+             (lambda (a b)
+               (or (< (nth 1 a) (nth 1 b))
+                   (and (= (nth 1 a) (nth 1 b))
+                        (< (nth 1 a) 2)
+                        (< (nth 2 a) (nth 2 b)))))))))
+
 (defun my/eglot-capf-setup ()
   "Put Eglot and snippets into one Corfu list; undo when Eglot stops."
   (when my/eglot-capf
@@ -451,7 +506,14 @@ Function contacts (e.g. `eglot-alternatives') are assumed available."
     (setq my/eglot-capf nil))
   (when (eglot-managed-p)
     (setq my/eglot-capf
-          (cape-capf-super #'eglot-completion-at-point #'yasnippet-capf))
+          ;; Corfu reuses the table while typing, but language servers may
+          ;; return only a limited list for an early prefix (e.g. "GL").
+          ;; Refresh the whole merged CAPF when the input changes, so the
+          ;; Eglot table and snippet metadata both describe the current text.
+          (cape-capf-sort
+           (cape-capf-buster
+            (cape-capf-super #'eglot-completion-at-point #'yasnippet-capf))
+           #'my/eglot-sort-completions))
     ;; Replace Eglot's own plain CAPF with the combined one.
     (remove-hook 'completion-at-point-functions #'eglot-completion-at-point t)
     (add-hook 'completion-at-point-functions my/eglot-capf -10 t)))
@@ -794,6 +856,9 @@ Function contacts (e.g. `eglot-alternatives') are assumed available."
 
   (super-save-mode 1))
 
+;; Replace the current Dired buffer when navigating to another directory.
+(setq dired-kill-when-opening-new-dired-buffer t)
+
 ;; Sidebar
 (use-package dired-subtree
   :ensure t
@@ -985,14 +1050,17 @@ lines up again."
 
 
 ;;; ----------------------------------------------------------------------
-;;; Formatting: Apheleia (format-on-save)
+;;; Formatting: Apheleia (explicit formatting)
 ;;; ----------------------------------------------------------------------
 
 (use-package apheleia
   :ensure t
+  :bind ("C-c f" . apheleia-format-buffer)
   :init
   ;; Dart uses Apheleia's built-in `dart-format' (dart format).
-  (apheleia-global-mode 1))
+  ;; Async format-on-save can move point when its edits arrive after saving.
+  ;; Keep saves predictable and run the formatter explicitly with C-c f.
+  (apheleia-global-mode -1))
 
 
 ;;; ----------------------------------------------------------------------
@@ -1032,6 +1100,7 @@ lines up again."
   :ensure t
   :defer t
   :bind (("C-c m l" . mc/edit-lines)
+         ("C-c m n" . mc/mark-next-lines)
          ("C-c m d" . mc/mark-next-like-this)))
 
 (use-package helpful
@@ -1196,6 +1265,10 @@ lines up again."
   (("C-c d l" . vscode-launch)
    ("C-c d r" . vscode-launch-rerun)
    ("C-c d o" . vscode-launch-open-file)))
+
+(use-package portal
+  :vc (:url "https://github.com/xiaoxinghu/portal" :rev :newest)
+  :defer t)
 
 (provide 'post-init)
 

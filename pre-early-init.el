@@ -1,7 +1,7 @@
-;;; pre-early-init.el --- Package startup settings -*- lexical-binding: t; -*-
+;;; pre-early-init.el --- Package startup settings -*- no-byte-compile: t; lexical-binding: t; -*-
 
-;; Elpaca handles package activation and installation.
+;; Let minimal-emacs initialize package.el during init.el.
 (setq package-enable-at-startup nil
-      minimal-emacs-package-initialize-and-refresh nil)
+      minimal-emacs-package-initialize-and-refresh t)
 
 ;;; pre-early-init.el ends here

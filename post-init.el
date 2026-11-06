@@ -1,10 +1,35 @@
-;;; post-init.el --- Init -*- lexical-binding: t; -*-
+;;; post-init.el --- Init -*- no-byte-compile: t; lexical-binding: t; -*-
 
 ;;; ----------------------------------------------------------------------
 ;;; Core
 ;;; ----------------------------------------------------------------------
 (setq auth-sources '("~/.authinfo.gpg" "~/.authinfo"))
 (add-to-list 'load-path (expand-file-name "lisp" user-emacs-directory))
+
+;; Activate the Org fork before other packages can load bundled Org.
+(use-package org
+  :ensure nil
+  :defer t
+  :init
+  ;; :vc alone skips installation because Org is also built into Emacs.
+  ;; Install the development fork once, then activate it below.
+  (unless (assq 'org package-alist)
+    (package-vc-install
+     '(org :url "https://code.tecosaur.net/tec/org-mode.git/"
+           :branch "dev"
+           :lisp-dir "lisp"
+           :make "autoloads")
+     nil))
+  ;; The fork reports 9.8pre, which can be older than bundled Org.
+  ;; Explicitly activate it even when package.el prefers the built-in version.
+  (unless (memq 'org package-activated-list)
+    (package-activate-1 (cadr (assq 'org package-alist))))
+  :custom
+  (org-startup-truncated nil)
+  (org-preview-latex-default-process 'dvisvgm)
+  (org-agenda-files
+   '("~/Dropbox/Documents/org-roam/20250805110520-backlog.org")))
+
 
 (use-package cookiecutter
   :ensure nil
@@ -355,10 +380,9 @@
 ;;; ----------------------------------------------------------------------
 
 (use-package cape
-  ;; Wait, so `cape-capf-super' exists before startup files run
-  ;; `prog-mode-hook' (otherwise void-function on first run / updates).
-  :ensure (:wait t)
-  :after corfu)
+  :ensure t
+  ;; Completion hooks below need Cape even before Corfu is loaded.
+  :demand t)
 
 
 ;;; ----------------------------------------------------------------------
@@ -600,15 +624,6 @@ Keep the server's order for fuzzy matches and equally ranked names."
 ;;; Org
 ;;; ----------------------------------------------------------------------
 
-(use-package org
-  :defer
-  :ensure (org :repo "https://code.tecosaur.net/tec/org-mode.git/"
-                :branch "dev")
-  :custom
-  (org-startup-truncated nil)
-  (org-preview-latex-default-process 'dvisvgm)
-  (org-agenda-files
-   '("~/Dropbox/Documents/org-roam/20250805110520-backlog.org")))
 
 (use-package org-fragtog
   :ensure t
@@ -622,8 +637,9 @@ Keep the server's order for fuzzy matches and equally ranked names."
   (org-mode . org-modern-mode))
 
 (use-package org-modern-indent
-  :ensure (org-modern-indent :repo "https://github.com/jdtsmith/org-modern-indent.git"
-                    :branch "main")
+  :ensure nil
+  :vc (:url "https://github.com/jdtsmith/org-modern-indent.git"
+       :branch "main" :rev :newest)
   :hook
   (org-mode . org-modern-indent-mode))
 
@@ -1267,6 +1283,7 @@ lines up again."
    ("C-c d o" . vscode-launch-open-file)))
 
 (use-package portal
+  :ensure nil
   :vc (:url "https://github.com/xiaoxinghu/portal" :rev :newest)
   :defer t)
 

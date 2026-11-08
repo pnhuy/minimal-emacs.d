@@ -980,6 +980,7 @@ Keep the server's order for fuzzy matches and equally ranked names."
   :defer t)
 
 (use-package smart-hungry-delete
+  :disabled  ;; temporary disable because conflict with multiple cursors
   :ensure t
 
   :bind

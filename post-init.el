@@ -12,24 +12,28 @@
   :ensure nil
   :defer t
   :init
-  ;; :vc alone skips installation because Org is also built into Emacs.
-  ;; Install the development fork once, then activate it below.
   (unless (assq 'org package-alist)
     (package-vc-install
-     '(org :url "https://code.tecosaur.net/tec/org-mode.git/"
-           :branch "dev"
-           :lisp-dir "lisp"
-           :make "autoloads")
-     nil))
-  ;; The fork reports 9.8pre, which can be older than bundled Org.
-  ;; Explicitly activate it even when package.el prefers the built-in version.
-  (unless (memq 'org package-activated-list)
-    (package-activate-1 (cadr (assq 'org package-alist))))
+     '(org :url "https://github.com/emacs-straight/org-mode.git"
+           :branch "main" :lisp-dir "lisp" :make "autoloads")))
   :custom
   (org-startup-truncated nil)
   (org-preview-latex-default-process 'dvisvgm)
+  (org-latex-preview-mode-display-live t)
   (org-agenda-files
-   '("~/Dropbox/Documents/org-roam/20250805110520-backlog.org")))
+   '("~/Dropbox/Documents/org-roam/20250805110520-backlog.org"))
+  :hook
+  (org-mode . org-latex-preview-mode)
+  :config
+  (setq org-latex-preview-preamble
+        (concat
+         (replace-regexp-in-string
+          "\\\\documentclass{article}"
+          "\\documentclass[fleqn]{article}"
+          org-latex-preview-preamble
+          t t)
+         "\n\\setlength{\\mathindent}{0pt}\n"))
+)
 
 
 (use-package cookiecutter
@@ -641,6 +645,7 @@ Keep the server's order for fuzzy matches and equally ranked names."
 
 
 (use-package org-fragtog
+  :disabled
   :ensure t
   :if (display-images-p)
   :hook

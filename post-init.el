@@ -40,6 +40,18 @@
   :ensure nil
   :commands opengl-create-project)
 
+;; EIN from the fork's release branch; package-vc installs its dependencies.
+(use-package ein
+  :vc (:url "https://github.com/pnhuy/emacs-ipython-notebook"
+       :branch "release"
+       :lisp-dir "lisp"
+       :rev :newest)
+  :defer t
+  :custom
+  (ein:jupyter-server-use-subcommand "server")
+  :init
+  (add-to-list 'auto-mode-alist '("\\.ipynb\\'" . ein:ipynb-mode)))
+
 (use-package batppuccin
   :ensure t
   :config
@@ -82,6 +94,8 @@
   :custom
   ;; Cursor benchmarks become slow beyond this line length (in bytes).
   (so-long-threshold 20000)
+  ;; Keep file-specific modes such as EIN's ipynb mode active on long JSON lines.
+  (so-long-action 'so-long-minor-mode)
   :config
   ;; Plain text is not included in the built-in target modes.
   (add-to-list 'so-long-target-modes 'text-mode)

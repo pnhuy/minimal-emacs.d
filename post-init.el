@@ -1303,6 +1303,13 @@ lines up again."
    ("C-c d r" . vscode-launch-rerun)
    ("C-c d o" . vscode-launch-open-file)))
 
+;; VS Code-style continue/step/restart/stop buttons in the mode line
+;; (and F5/F6/F10/F11 keys) while a launch or debug session runs.
+(use-package debug-toolbar
+  :ensure nil
+  :demand t
+  :config (debug-toolbar-mode 1))
+
 (use-package portal
   :ensure nil
   :vc (:url "https://github.com/xiaoxinghu/portal" :rev :newest)

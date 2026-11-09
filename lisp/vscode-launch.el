@@ -24,7 +24,13 @@
 ;;
 ;; Configurations that are plain commands (`node' with an npm/npx
 ;; `runtimeExecutable', `node-terminal') run in a comint `compile' buffer,
-;; which dape cannot express.  Compounds run their members in order.
+;; which dape cannot express.  Like VS Code's `node-terminal', such a
+;; command is debugged by attaching to the node process it starts: when
+;; its output announces "Debugger listening on ws://HOST:PORT" (what
+;; `node --inspect' prints, also under nodemon), a dape attach session
+;; (`vscode-launch-node-attach-key', with `restart' so that nodemon
+;; restarts reconnect) is started.  A command that does not start node
+;; with --inspect is not debugged.  Compounds run their members in order.
 ;; Attach requests and browser types are reported as unsupported.
 ;;
 ;; Pipeline: read JSONC -> pick -> platform override (linux/osx/windows)
@@ -41,8 +47,16 @@
 ;; (see `vscode-launch-command-resolvers').  ${config:NAME} needs
 ;; `vscode-launch-config-variable-function'.
 ;;
-;; Not supported: tasks (`preLaunchTask'/`postDebugTask' only warn), and
-;; anything a VS Code debugger extension does in its own
+;; `preLaunchTask' (of a configuration or a compound) is run from
+;; `.vscode/tasks.json' before the configuration starts: `shell',
+;; `process' and `npm' tasks, `dependsOn' with `dependsOrder', platform
+;; overrides, `options' (cwd, env, shell) and background tasks.  A
+;; background task counts as ready when its problem matcher's
+;; `endsPattern' (or the built-in `$tsc-watch') matches its output, and a
+;; background task still running from an earlier launch is reused.  A
+;; failing task stops the launch.  `postDebugTask' only warns.
+;;
+;; Not supported: anything a VS Code debugger extension does in its own
 ;; resolveDebugConfiguration hooks.  `env' and `envFile' values are never
 ;; echoed or logged, since launch.json files often hold credentials.
 ;;
@@ -138,6 +152,10 @@ debugpy is installed into its own virtual environment under
 `dape-adapter-dir', never into the project's.  `ask' offers to create it,
 t creates it without asking, nil never does."
   :type '(choice (const :tag "Ask first" ask) (const :tag "Always" t) (const :tag "Never" nil)))
+
+(defcustom vscode-launch-node-attach-key 'js-debug-node-attach
+  "Key of the `dape-configs' entry used to attach to a node-terminal command."
+  :type 'symbol)
 
 (defcustom vscode-launch-client-properties
   '(:name :presentation :preLaunchTask :postDebugTask
@@ -864,14 +882,46 @@ so the dape entry's own `:type' stays in effect."
                               (and program (list program))
                               (vscode-launch--arg-strings (plist-get cfg :args)))))))))
 
-(defun vscode-launch--plan-node-terminal (cfg root _force-run)
-  "Plan a node-terminal CFG relative to ROOT: run its `command' verbatim."
-  (let ((command (plist-get cfg :command)))
+(defconst vscode-launch--attach-keys
+  '(:skipFiles :outFiles :sourceMaps :resolveSourceMapLocations :sourceMapPathOverrides
+    :smartStep :pauseForSourceMap)
+  "launch.json properties forwarded to the attach session of a node-terminal command.")
+
+(defun vscode-launch--plan-node-terminal (cfg root force-run)
+  "Plan a node-terminal CFG relative to ROOT: run its `command' verbatim.
+Unless FORCE-RUN, also plan attaching a debugger to the node it starts."
+  (let ((command (plist-get cfg :command))
+        (cwd (vscode-launch--cwd cfg root)))
     (if (not (stringp command))
         (list :unsupported :reason "node-terminal config has no `command'")
-      (list :run :command (vscode-launch--fix-command-exe command)
-            :cwd (vscode-launch--cwd cfg root)
-            :env (vscode-launch--env cfg root)))))
+      (append
+       (list :run :command (vscode-launch--fix-command-exe command)
+             :cwd cwd
+             :env (vscode-launch--env cfg root))
+       (when (and (not force-run) vscode-launch-prefer-debugger
+                  (vscode-launch--js-debug-available-p)
+                  (vscode-launch--dape-entry-p vscode-launch-node-attach-key))
+         (list :attach
+               (list :key vscode-launch-node-attach-key
+                     :options
+                     (vscode-launch--attach-options cfg root cwd))))))))
+
+(defun vscode-launch--attach-options (cfg root cwd)
+  "Return the dape options for attaching to the node-terminal CFG.
+The source-map and skipFiles defaults are what VS Code uses, where
+${workspaceFolder} limits source maps to the workspace.  An attach session
+has no workspace, so without them js-debug looks for the source maps of
+every module in node_modules."
+  (let ((given (cl-loop for (k v) on cfg by #'cddr
+                        when (memq k vscode-launch--attach-keys)
+                        append (list k (vscode-launch--to-dape-value v)))))
+    (append (list :cwd cwd :restart t)
+            given
+            (unless (plist-member given :resolveSourceMapLocations)
+              (list :resolveSourceMapLocations
+                    (vector (concat root "/**") "!**/node_modules/**")))
+            (unless (plist-member given :skipFiles)
+              (list :skipFiles (vector "<node_internals>/**"))))))
 
 (defun vscode-launch--plan-dape-generic (cfg root force-run)
   "Plan CFG of any other type through the dape entry matching its type."
@@ -916,6 +966,203 @@ user error if CONFIG cannot be started under dape."
 
 
 ;;; ----------------------------------------------------------------------
+;;; Tasks (preLaunchTask)
+;;; ----------------------------------------------------------------------
+;; A task plan is (:label L :exec EXEC :deps (TASKPLAN...) :order sequence|parallel)
+;; where EXEC is nil or
+;;   (:label L :command STR :cwd DIR :env ALIST :shell (EXE . SWITCH)
+;;    :background BOOL :ready REGEXP)
+;; Dependencies run first; then EXEC.  Planning starts nothing.
+
+(defun vscode-launch--tasks-data (root ctx)
+  "Return the parsed tasks.json of ROOT (cached in CTX), or nil without one."
+  (let* ((cache (plist-get ctx :cache))
+         (key (cons 'tasks root))
+         (hit (and cache (gethash key cache 'none))))
+    (if (and hit (not (eq hit 'none)))
+        (if (eq hit :absent) nil hit)
+      (let* ((file (expand-file-name ".vscode/tasks.json" root))
+             (data (when (file-readable-p file)
+                     (with-temp-buffer
+                       (insert-file-contents file)
+                       (condition-case err
+                           (vscode-launch--parse (buffer-string))
+                         (user-error (signal (car err) (cdr err)))
+                         (error (user-error "Cannot parse tasks.json: %s"
+                                            (error-message-string err))))))))
+        (when cache (puthash key (or data :absent) cache))
+        data))))
+
+(defun vscode-launch--find-task (label data)
+  "Return the task LABEL from the tasks.json DATA, or an implicit npm task, or nil."
+  (or (cl-find-if (lambda (task)
+                    (and (vscode-launch--plistp task)
+                         (equal (or (plist-get task :label) (plist-get task :taskName)) label)))
+                  (plist-get data :tasks))
+      (when (string-match "\\`npm: \\([^ ]+\\)\\(?: - \\(.+\\)\\)?\\'" label)
+        (list :label label :type "npm" :script (match-string 1 label)
+              :path (match-string 2 label)))))
+
+(defun vscode-launch--depends-on (task)
+  "Return the labels in TASK's `dependsOn'."
+  (let ((d (plist-get task :dependsOn)))
+    (mapcar (lambda (x) (if (stringp x) x (plist-get x :task)))
+            (cond ((stringp d) (list d))
+                  ((vectorp d) (append d nil))
+                  ((vscode-launch--plistp d) (list d))))))
+
+(defun vscode-launch--task-ready-regexp (matcher)
+  "Return the regexp that marks a background task as ready, from MATCHER, or nil."
+  (let ((m (if (vectorp matcher) (and (> (length matcher) 0) (aref matcher 0)) matcher)))
+    (cond ((equal m "$tsc-watch") "Watching for file changes")
+          ((vscode-launch--plistp m)
+           (let ((end (plist-get (plist-get m :background) :endsPattern)))
+             (cond ((stringp end) end)
+                   ((stringp (plist-get m :base))
+                    (vscode-launch--task-ready-regexp (plist-get m :base)))))))))
+
+(defun vscode-launch--task-arg (a)
+  "Return the task argument A (a string or a {value} object) as a string."
+  (if (stringp a) a (format "%s" (plist-get a :value))))
+
+(defun vscode-launch--task-exec (task root)
+  "Return the EXEC plist of the resolved TASK, or nil when it only has dependencies."
+  (let* ((type (plist-get task :type))
+         (opts (plist-get task :options))
+         (label (plist-get task :label))
+         (cwd (expand-file-name (or (plist-get opts :cwd) ".") root))
+         (args (mapcar #'vscode-launch--task-arg (append (plist-get task :args) nil)))
+         (background (eq (plist-get task :isBackground) t))
+         (command
+          (cond
+           ((equal type "npm")
+            (setq cwd (expand-file-name (or (plist-get task :path) ".") root))
+            (vscode-launch--shell-join
+             (list "npm" "run" (or (plist-get task :script)
+                                   (user-error "npm task `%s' has no `script'" label)))))
+           ((not (stringp (plist-get task :command))) nil)
+           ((equal type "process")
+            (vscode-launch--shell-join (cons (plist-get task :command) args)))
+           (t (concat (plist-get task :command)
+                      (mapconcat (lambda (a) (concat " " (vscode-launch--shell-join (list a))))
+                                 args ""))))))
+    (when command
+      (let* ((shell (plist-get opts :shell))
+             (exe (and (vscode-launch--plistp shell) (plist-get shell :executable)))
+             (switch (and exe (car (append (plist-get shell :args) nil))))
+             (ready (and background
+                         (vscode-launch--task-ready-regexp (plist-get task :problemMatcher)))))
+        (when (and background (not ready))
+          (display-warning 'vscode-launch
+                           (format "Cannot tell when background task `%s' is ready (no known \
+`endsPattern'); continuing right after starting it" label)))
+        (list :label label :command command :cwd cwd :env (vscode-launch--env opts root)
+              :shell (and exe (cons exe (or switch "-c")))
+              :background background :ready ready)))))
+
+(defun vscode-launch--task-plan (label root ctx &optional stack)
+  "Return the task plan for the task LABEL under ROOT.  STACK guards cycles."
+  (when (member label stack)
+    (user-error "Task `%s' depends on itself" label))
+  (let* ((data (vscode-launch--tasks-data root ctx))
+         (task (or (vscode-launch--find-task label data)
+                   (user-error "Task `%s' not found in %s" label
+                               (expand-file-name ".vscode/tasks.json" root))))
+         (task (vscode-launch-resolve (if (plist-member task :label)
+                                          task
+                                        (plist-put (copy-sequence task) :label label))
+                                      ctx)))
+    (list :label label
+          :order (if (equal (plist-get task :dependsOrder) "sequence") 'sequence 'parallel)
+          :deps (mapcar (lambda (dep) (vscode-launch--task-plan dep root ctx (cons label stack)))
+                        (vscode-launch--depends-on task))
+          :exec (vscode-launch--task-exec task root))))
+
+(defun vscode-launch--task-buffer-name (label)
+  "Return the name of the buffer that runs the task LABEL."
+  (format "*vscode-task: %s*" label))
+
+(defun vscode-launch--exec-task (exec done)
+  "Run EXEC, then call DONE with no arguments, unless it fails.
+A background task is done once it is ready; one still running is reused."
+  (let* ((label (plist-get exec :label))
+         (bufname (vscode-launch--task-buffer-name label))
+         (old (get-buffer-process bufname)))
+    (cond
+     ((and (plist-get exec :background) old (process-live-p old))
+      (message "vscode-launch: task `%s' is already running" label)
+      (funcall done))
+     (t
+      (unless (file-directory-p (plist-get exec :cwd))
+        (user-error "Task `%s': working directory %s does not exist" label (plist-get exec :cwd)))
+      (message "vscode-launch: running task `%s'..." label)
+      (let* ((default-directory (file-name-as-directory (plist-get exec :cwd)))
+             (shell (plist-get exec :shell))
+             (shell-file-name (if shell (car shell) shell-file-name))
+             (shell-command-switch (if shell (cdr shell) shell-command-switch))
+             (compilation-ask-about-save nil)
+             (compilation-scroll-output t)
+             (compilation-environment
+              (append (mapcar (lambda (kv) (if (cdr kv) (format "%s=%s" (car kv) (cdr kv)) (car kv)))
+                              (plist-get exec :env))
+                      compilation-environment))
+             (display-buffer-overriding-action '(display-buffer-no-window (allow-no-window . t)))
+             (buf (compilation-start (plist-get exec :command) nil (lambda (_mode) bufname)))
+             (proc (get-buffer-process buf))
+             (ready (plist-get exec :ready))
+             (finished nil)
+             (recent ""))
+        (cl-flet ((finish (ok)
+                    (unless finished
+                      (setq finished t)
+                      (if ok
+                          (funcall done)
+                        (message "vscode-launch: task `%s' failed, launch cancelled" label)
+                        (display-buffer buf)))))
+          (add-function :after (process-sentinel proc)
+                        (lambda (p _event)
+                          (when (memq (process-status p) '(exit signal))
+                            (finish (and (eq (process-status p) 'exit)
+                                         (zerop (process-exit-status p)))))))
+          (when (plist-get exec :background)
+            (if (not ready)
+                (finish t)
+              (add-function :after (process-filter proc)
+                            (lambda (_p output)
+                              (setq recent (concat recent (replace-regexp-in-string
+                                                           "\e\\[[0-9;]*[A-Za-z]" "" output)))
+                              (setq recent (substring recent (max 0 (- (length recent) 4000))))
+                              (when (string-match-p ready recent)
+                                (finish t))))))))))))
+
+(defun vscode-launch--run-task-plan (plan done)
+  "Run the task PLAN: its dependencies, then its own command; then call DONE."
+  (let ((deps (plist-get plan :deps))
+        (exec (plist-get plan :exec)))
+    (let ((then (lambda ()
+                  (if exec (vscode-launch--exec-task exec done) (funcall done)))))
+      (if (eq (plist-get plan :order) 'sequence)
+          (vscode-launch--run-tasks-in-sequence deps then)
+        (vscode-launch--run-tasks-in-parallel deps then)))))
+
+(defun vscode-launch--run-tasks-in-sequence (plans then)
+  "Run the task PLANS one after the other, then call THEN."
+  (if (null plans)
+      (funcall then)
+    (vscode-launch--run-task-plan
+     (car plans) (lambda () (vscode-launch--run-tasks-in-sequence (cdr plans) then)))))
+
+(defun vscode-launch--run-tasks-in-parallel (plans then)
+  "Start all the task PLANS at once, call THEN when all are done."
+  (if (null plans)
+      (funcall then)
+    (let ((left (length plans)))
+      (dolist (p plans)
+        (vscode-launch--run-task-plan
+         p (lambda () (when (zerop (cl-decf left)) (funcall then))))))))
+
+
+;;; ----------------------------------------------------------------------
 ;;; Execution
 ;;; ----------------------------------------------------------------------
 
@@ -932,7 +1179,38 @@ user error if CONFIG cannot be started under dape."
           (lambda (_mode) (format "*vscode-launch: %s*" name))))
     (unless (file-directory-p cwd)
       (user-error "Working directory %s does not exist" cwd))
-    (compile (plist-get plan :command) t)))
+    (let ((buf (compile (plist-get plan :command) t)))
+      (when (plist-get plan :attach)
+        (vscode-launch--attach-when-listening buf cwd (plist-get plan :attach)))
+      buf)))
+
+(defun vscode-launch--attach-when-listening (buf cwd attach)
+  "Start the dape ATTACH session once the process of BUF announces its inspector.
+ATTACH is (:key KEY :options PLIST).  Only the first announcement counts: node
+restarts (nodemon) are followed by the session's `restart' option."
+  (when-let* ((proc (get-buffer-process buf)))
+    (let ((recent "") (attached nil))
+      (add-function
+       :after (process-filter proc)
+       (lambda (_p output)
+         (unless attached
+           (setq recent (concat recent (replace-regexp-in-string "\e\\[[0-9;]*[A-Za-z]" "" output)))
+           (setq recent (substring recent (max 0 (- (length recent) 4000))))
+           (when (string-match "Debugger listening on ws://\\(\\[?[^]/ ]+\\]?\\):\\([0-9]+\\)/"
+                               recent)
+             (let ((host (match-string 1 recent))
+                   (port (string-to-number (match-string 2 recent))))
+               (setq attached t)
+               (run-at-time
+                0 nil
+                (lambda ()
+                  (condition-case err
+                      (vscode-launch--run-dape
+                       (list :key (plist-get attach :key) :cwd cwd
+                             :options (append (list :address host :port port)
+                                              (plist-get attach :options))))
+                    (error (message "vscode-launch: cannot attach the debugger: %s"
+                                    (error-message-string err))))))))))))))
 
 (defun vscode-launch--run-dape (plan)
   "Start a dape session from PLAN."
@@ -950,7 +1228,7 @@ user error if CONFIG cannot be started under dape."
 
 (defun vscode-launch--warn-unsupported (obj kind name)
   "Warn about ignored client features in OBJ, the KIND (string) called NAME."
-  (dolist (key '(:preLaunchTask :postDebugTask))
+  (dolist (key '(:postDebugTask))
     (when (stringp (plist-get obj key))
       (display-warning 'vscode-launch
                        (format "%s `%s' of %s `%s' is not supported; run it yourself"
@@ -977,6 +1255,12 @@ A member with a workspace FOLDER is looked up in that folder's launch.json."
                                    (vscode-launch-make-context root2 data2)
                                    force-run seen))))
 
+(defun vscode-launch--pre-plans (obj root ctx)
+  "Return the (NAME . (:pre :task PLAN)) step for OBJ's `preLaunchTask', as a list."
+  (let ((label (plist-get obj :preLaunchTask)))
+    (when (stringp label)
+      (list (cons label (list :pre :task (vscode-launch--task-plan label root ctx)))))))
+
 (defun vscode-launch--plans (name data root ctx force-run &optional seen)
   "Return a list of (NAME . PLAN) for the config or compound NAME of DATA.
 Everything is resolved and planned before anything starts, so a compound
@@ -994,15 +1278,17 @@ against compounds that contain themselves."
           (user-error "%s: %s" name (plist-get (cdr plan) :reason)))
         (when (and vscode-launch--require-dape (not (eq (car plan) :dape)))
           (user-error "%s cannot be started under dape: it runs as a plain command" name))
-        (list (cons name plan))))
+        (append (vscode-launch--pre-plans cfg root ctx)
+                (list (cons name plan)))))
      ((assoc name compounds)
       (when (member id seen)
         (user-error "Compound `%s' contains itself" name))
       (let ((compound (cdr (assoc name compounds))))
         (vscode-launch--warn-unsupported compound "compound" name)
-        (cl-loop for (member . folder) in (vscode-launch--compound-members compound)
-                 append (vscode-launch--member-plans
-                         member folder name data root ctx force-run (cons id seen)))))
+        (append (vscode-launch--pre-plans compound root ctx)
+                (cl-loop for (member . folder) in (vscode-launch--compound-members compound)
+                         append (vscode-launch--member-plans
+                                 member folder name data root ctx force-run (cons id seen))))))
      (t (user-error "No configuration named `%s'" name)))))
 
 (defun vscode-launch--run-name (name data root ctx force-run)
@@ -1014,12 +1300,30 @@ against compounds that contain themselves."
       (vscode-launch--ensure-debugpy))
     (when (cl-some (lambda (p)
                      (let ((plan (cdr p)))
-                       (and (eq (car plan) :dape)
-                            (string-prefix-p "js-debug" (symbol-name (plist-get (cdr plan) :key))))))
+                       (or (and (eq (car plan) :dape)
+                                (string-prefix-p "js-debug" (symbol-name (plist-get (cdr plan) :key))))
+                           (and (eq (car plan) :run) (plist-get (cdr plan) :attach)))))
                    plans)
       (vscode-launch--ensure-js-debug))
-    (dolist (p plans)
-      (vscode-launch--run-plan (car p) (cdr p)))))
+    (vscode-launch--run-steps plans)))
+
+(defun vscode-launch--run-steps (steps)
+  "Run STEPS, a list of (NAME . PLAN), in order.
+A `:pre' step is a task that has to finish before the rest continues, which
+can happen later, from a process sentinel or filter."
+  (when steps
+    (let ((name (car (car steps)))
+          (plan (cdr (car steps)))
+          (rest (cdr steps)))
+      (if (eq (car plan) :pre)
+          (vscode-launch--run-task-plan
+           (plist-get (cdr plan) :task)
+           (lambda ()
+             (condition-case err
+                 (vscode-launch--run-steps rest)
+               (error (message "vscode-launch: %s" (error-message-string err))))))
+        (vscode-launch--run-plan name plan)
+        (vscode-launch--run-steps rest)))))
 
 
 ;;; ----------------------------------------------------------------------

@@ -94,10 +94,8 @@
       ;; internal helper files. This provides a library-focused list.
       find-library-include-other-files nil
 
-      ;; Protect the system from code injection vulnerabilities when browsing
-      ;; files. Disabling local 'eval' expressions ensures that opening a
-      ;; malicious project or third-party script cannot execute arbitrary Lisp
-      ;; code on your machine.
+      ;; Disable evaluation of `eval' forms in file-local variables. This
+      ;; reduces the risk of executing untrusted code when opening files.
       enable-local-eval nil)
 
 ;;  `prettify-symbols-mode': Show unprettified symbol at point
@@ -265,6 +263,16 @@
 ;;; VC
 
 (setq vc-git-print-log-follow t
+      ;; Remove obsolete version control systems to enhance file loading
+      ;; performance, especially over TRAMP:
+      ;;   - SCCS: A historical version control system.
+      ;;   - SRC: A niche system with limited adoption.
+      ;;   - Bzr: Obsolete. Even Canonical migrated to Git.
+      ;;   - CVS: Largely superseded by newer version control systems.
+      ;; Exception:
+      ;;   - RCS: Obsolete, but still used by some sysadmins to version
+      ;;     individual files, including files under /etc.
+      vc-handled-backends '(Git SVN Hg RCS)
       vc-git-diff-switches '("--histogram"))  ; Faster algorithm for diffing.
 
 ;;; Auto save
@@ -312,7 +320,7 @@ This should be called after changing `auto-save-list-file-prefix'."
 ;; permissions.
 (when auto-save-default
   (let ((auto-save-dir (file-name-directory auto-save-list-file-prefix)))
-    (unless (file-exists-p auto-save-dir)
+    (unless (file-directory-p auto-save-dir)
       (with-file-modes #o700
         (make-directory auto-save-dir t)))))
 
@@ -339,7 +347,7 @@ This should be called after changing `auto-save-list-file-prefix'."
 
 ;;; recentf
 
-;; `recentf' is an that maintains a list of recently accessed files.
+;; `recentf' maintains a list of recently accessed files.
 (setq recentf-max-saved-items 210
       recentf-max-menu-items 15)
 
@@ -654,7 +662,7 @@ This should be called after changing `auto-save-list-file-prefix'."
 
       dabbrev-ignored-buffer-modes
       '(archive-mode image-mode docview-mode tags-table-mode
-                     pdf-view-mode tags-table-mode)
+                     pdf-view-mode)
 
       dabbrev-ignored-buffer-regexps
       '(;; - Buffers starting with a space (internal or temporary buffers)

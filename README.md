@@ -3,6 +3,10 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 ![](https://jamescherti.com/misc/made-for-gnu-emacs.svg)
 
+- Git repository: [minimal-emacs.d](https://github.com/jamescherti/minimal-emacs.d)
+- Author: [James Cherti](https://www.jamescherti.com/)
+- License: GPL 3.0 or later
+
 ## Introduction
 
 The [minimal-emacs.d](https://github.com/jamescherti/minimal-emacs.d) project is a **fast and lightweight** minimal Emacs starter kit (`init.el` and `early-init.el`) that **gives you full control over your configuration**. It provides better defaults, an optimized startup, and a clean foundation for building your own vanilla Emacs setup.
@@ -142,7 +146,7 @@ Always begin your `pre-init.el`, `post-init.el`, `post-early-init.el`, and `pre-
 
 Replace `FILENAME.el` with the actual name and DESCRIPTION with a brief description of its purpose.
 
-*(Only if you know what you're doing: Removing `no-byte-compile: t;` from your init files allows Emacs to compile them, improving load and execution speed. However, if you do so, you may need to add required dependencies. For example, if you're using `use-package`, add `(require 'use-package)` at the top of `post-init.el` to ensure all necessary `use-package` variables and functions are loaded. **The only init file where `no-byte-compile: t` should never be removed is `early-init.el`**, because if this file is compiled, Emacs may load an outdated compiled version.)*
+*(Only if you know what you're doing: Removing `no-byte-compile: t;` from your init files allows Emacs to compile them, improving load and execution speed. However, if you do so, you may need to add required dependencies. For example, if you're using `use-package`, add `(require 'use-package)` at the top of `post-init.el` to ensure all necessary `use-package` variables and functions are loaded.)*
 
 **Important:** The examples in this README reference pre/post init files in the `~/.emacs.d/` directory, but the files `pre-early-init.el`, `post-early-init.el`, `pre-init.el`, and `post-init.el` should be placed in the same directory as `init.el` and `early-init.el`, regardless of their location.
 
@@ -359,10 +363,13 @@ To configure `corfu` and `cape`, add the following to `~/.emacs.d/post-init.el`:
 ;; can be selected by navigating up or down.
 (use-package corfu
   :init
+  ;; Disable Ispell completion function. As an alternative try `cape-dict'.
   (setq text-mode-ispell-word-completion nil)
+
   ;; Hide commands in M-x which do not apply to the current mode.
   (setq read-extended-command-predicate #'command-completion-default-include-p)
-  ;; Disable Ispell completion function. As an alternative try `cape-dict'.
+
+  ;; Enable completion by pressing TAB.
   (setq tab-always-indent 'complete)
 
   (global-corfu-mode 1))
@@ -1237,7 +1244,6 @@ To set up Language Server Protocol (LSP) servers using Eglot, you can configure 
 (use-package eglot
   :ensure nil
   :commands (eglot-ensure
-             eglot-rename
              eglot-format-buffer))
 ```
 
@@ -2817,6 +2823,7 @@ You should have received a copy of the GNU General Public License along with thi
 
 ## Links
 
+- [minimal-emacs.d @jamescherti.com: A Customizable Emacs init.el and early-init.el for Better Defaults and Optimized Startup](https://www.jamescherti.com/minimal-emacs-d/)
 - [minimal-emacs.d @GitHub](https://github.com/jamescherti/minimal-emacs.d)
 
 Contribution from the minimal-emacs.d community:

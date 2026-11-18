@@ -24,7 +24,15 @@
 ;;
 ;; Configurations that are plain commands (`node' with an npm/npx
 ;; `runtimeExecutable', `node-terminal') run in a comint `compile' buffer,
-;; which dape cannot express.  Like VS Code's `node-terminal', such a
+;; which dape cannot express.  Output keeps bounded scrollback and
+;; abbreviates long lines; see `vscode-launch-output-max-line-length',
+;; `vscode-launch-output-max-size' and `comint-buffer-maximum-size'.
+;; Display updates are batched; during a flood only the newest pending
+;; output is displayed, with a notice for discarded output.
+;; Compiler error parsing runs on demand via `next-error', not on redisplay.
+;; The same output bounds apply to Dape shell and REPL buffers, including
+;; Dape's native REPL writer which bypasses comint preoutput hooks.
+;; Like VS Code's `node-terminal', such a
 ;; command is debugged by attaching to the node process it starts: when
 ;; its output announces "Debugger listening on ws://HOST:PORT" (what
 ;; `node --inspect' prints, also under nodemon), a dape attach session
@@ -74,12 +82,16 @@
 (require 'subr-x)
 (require 'project)
 (require 'compile)
+(require 'comint)
+(require 'ansi-color)
 (require 'url-handlers)
 
 (defvar dape-configs)
 (defvar dape-adapter-dir)
+(defvar dape-repl-echo-shell-output)
 (declare-function dape "dape" (config &optional skip-compile))
 (declare-function dape--config-eval "dape" (key options &optional skip-functions))
+(declare-function dape--repl-insert "dape" (string))
 
 
 ;;; ----------------------------------------------------------------------
@@ -130,6 +142,34 @@ Each is called with the context plist and returns a string."
   "When non-nil, start a debugger via dape when a configuration allows it.
 A prefix argument to `vscode-launch' inverts this for one call."
   :type 'boolean)
+
+(defcustom vscode-launch-output-max-line-length 2048
+  "Maximum characters of each output line displayed inline.
+The rest of a longer line is folded: it is kept out of the buffer text,
+as a text property on a one-character placeholder, so redisplay and comint
+never scan it.  Press \\<vscode-launch-fold-map>\\[vscode-launch-expand-fold] on the placeholder to
+expand it.  This also bounds lines that never end with a newline."
+  :type 'natnum)
+
+(defcustom vscode-launch-output-max-size (* 1024 1024)
+  "Maximum characters of command output retained in a launch buffer.
+Older output is discarded.  `comint-buffer-maximum-size' additionally
+limits scrollback by line count.  Pending user input is preserved."
+  :type 'natnum)
+
+(defcustom vscode-launch-output-update-interval 0.2
+  "Seconds between command output display updates.
+Process output is drained into a bounded queue between updates, without
+running comint or redisplay hooks for every process read.  The default
+refreshes at most five times per second, including when the buffer is visible."
+  :type 'number)
+
+(defcustom vscode-launch-output-max-pending-size (* 2 1024 1024)
+  "Maximum characters awaiting display in a command's output queue.
+During a log flood, older pending output is discarded and a notice is
+displayed.  This bounds the work done by each display update, independently
+of the scrollback limit `vscode-launch-output-max-size'."
+  :type 'natnum)
 
 (defconst vscode-launch--js-debug-fallback-version "v1.140.0"
   "Release used when the latest one cannot be looked up.")
@@ -1166,6 +1206,387 @@ A background task is done once it is ready; one still running is reused."
 ;;; Execution
 ;;; ----------------------------------------------------------------------
 
+(defvar vscode-launch--display-process nil
+  "Process whose queued output is being displayed, even after it exits.")
+
+(defvar-local vscode-launch--output-line-length 0
+  "Characters retained from the current output line, including truncation.
+A value greater than `vscode-launch-output-max-line-length' means the
+line's truncation marker has already been emitted.")
+
+(cl-defstruct (vscode-launch--output (:constructor vscode-launch--make-output))
+  "A process's bounded display queue and original comint handlers."
+  chunks tail (size 0) (dropped 0) timer filter sentinel)
+
+(defvar vscode-launch--inserting-dape-output nil
+  "Non-nil while a queued batch is inserted through Dape's native REPL writer.")
+
+(defun vscode-launch--output-buffer-p ()
+  "Return non-nil in command and Dape output buffers managed by this library."
+  (and (derived-mode-p 'comint-mode)
+       (or (string-prefix-p "*vscode-launch: " (buffer-name))
+           (derived-mode-p 'dape-repl-mode 'dape-shell-mode))))
+
+(defun vscode-launch--queue-output (proc output)
+  "Drain OUTPUT from PROC, deferring comint work to a bounded display update."
+  (when-let* ((buf (process-buffer proc))
+              ((buffer-live-p buf))
+              (state (process-get proc 'vscode-launch-output)))
+    (let ((node (list output))
+          (limit vscode-launch-output-max-pending-size))
+      (if (vscode-launch--output-tail state)
+          (setcdr (vscode-launch--output-tail state) node)
+        (setf (vscode-launch--output-chunks state) node))
+      (setf (vscode-launch--output-tail state) node)
+      (cl-incf (vscode-launch--output-size state) (length output))
+      ;; Evict from the head in amortized constant time.  Never concatenate
+      ;; the backlog in the process filter or retain arbitrarily large chunks.
+      (while (> (vscode-launch--output-size state) limit)
+        (let* ((head (vscode-launch--output-chunks state))
+               (text (car head))
+               (drop (min (length text)
+                          (- (vscode-launch--output-size state) limit))))
+          (cl-incf (vscode-launch--output-dropped state) drop)
+          (cl-decf (vscode-launch--output-size state) drop)
+          (if (= drop (length text))
+              (setf (vscode-launch--output-chunks state) (cdr head))
+            (setcar head (substring text drop)))))
+      (unless (vscode-launch--output-timer state)
+        (setf (vscode-launch--output-timer state)
+              (run-at-time vscode-launch-output-update-interval
+                           nil #'vscode-launch--flush-output proc))))))
+
+(defun vscode-launch--cancel-output-timer (proc)
+  "Cancel PROC's scheduled display update without discarding queued output."
+  (when-let* ((state (process-get proc 'vscode-launch-output)))
+    (when (timerp (vscode-launch--output-timer state))
+      (cancel-timer (vscode-launch--output-timer state)))
+    (setf (vscode-launch--output-timer state) nil)))
+
+(defun vscode-launch--discard-output (proc)
+  "Cancel PROC's pending display work when its buffer is killed or reused."
+  (vscode-launch--cancel-output-timer proc)
+  (when-let* ((state (process-get proc 'vscode-launch-output)))
+    (setf (vscode-launch--output-chunks state) nil
+          (vscode-launch--output-tail state) nil
+          (vscode-launch--output-size state) 0
+          (vscode-launch--output-dropped state) 0)))
+
+(defun vscode-launch--display-output (proc filter output)
+  "Insert OUTPUT using FILTER without repeatedly recentering visible windows.
+Windows already following PROC keep showing the tail.  Windows scrolled
+back into history keep their position.  Redisplay happens after the whole
+batch and window positions have been updated."
+  (let* ((buf (process-buffer proc))
+         (following (cl-remove-if
+                     (lambda (win) (< (window-point win) (process-mark proc)))
+                     (get-buffer-window-list buf nil t)))
+         (inhibit-redisplay t)
+         (vscode-launch--display-process proc))
+    (funcall filter proc output)
+    (dolist (win following)
+      (when (and (window-live-p win) (eq (window-buffer win) buf))
+        (save-excursion
+          (goto-char (window-point win))
+          ;; Lines are not wrapped in launch buffers.  Avoid `recenter',
+          ;; which asks redisplay to measure and scroll through output.
+          (forward-line (- 1 (max 1 (window-body-height win))))
+          (set-window-start win (point) t)
+          (set-window-vscroll win 0))))))
+
+(defun vscode-launch--flush-output (proc)
+  "Display at most one bounded batch of PROC's queued output."
+  (when-let* ((state (process-get proc 'vscode-launch-output)))
+    (vscode-launch--cancel-output-timer proc)
+    (let ((chunks (vscode-launch--output-chunks state))
+          (dropped (vscode-launch--output-dropped state))
+          (buf (process-buffer proc)))
+      (vscode-launch--discard-output proc)
+      (when (and chunks (buffer-live-p buf)
+                 ;; A sentinel may flush after the process has exited, but
+                 ;; an old process must never write into a newer run's buffer.
+                 (memq (get-buffer-process buf) (list nil proc)))
+        (with-current-buffer buf
+          (let ((output (apply #'concat chunks)))
+            (when (> dropped 0)
+              ;; A gap may have lost a newline or an ANSI reset.
+              (setq vscode-launch--output-line-length 0
+                    ansi-color-context nil)
+              (setq output
+                    (concat (format "\n[vscode-launch: skipped %d output characters]\n"
+                                    dropped)
+                            output)))
+            (vscode-launch--display-output
+             proc (vscode-launch--output-filter state) output)))))))
+
+(defun vscode-launch--handle-output-exit (proc event)
+  "Flush PROC's last output before its original sentinel handles EVENT."
+  (when-let* ((state (process-get proc 'vscode-launch-output)))
+    (unwind-protect
+        (when (memq (process-status proc) '(exit signal closed failed))
+          (vscode-launch--flush-output proc))
+      (when-let* ((sentinel (vscode-launch--output-sentinel state)))
+        (funcall sentinel proc event)))))
+
+(defvar vscode-launch-fold-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'vscode-launch-expand-fold)
+    (define-key map [mouse-1] #'vscode-launch-expand-fold)
+    map)
+  "Keymap active on a folded part of a long output line.")
+
+(defun vscode-launch--fold-segment (piece first)
+  "Return a placeholder string hiding PIECE; FIRST says to show a label."
+  (propertize " "
+              'display (if first
+                           (propertize " … [long line folded: RET to expand]"
+                                       'face 'shadow)
+                         "")
+              'vscode-launch-fold piece
+              'keymap vscode-launch-fold-map
+              'mouse-face 'highlight
+              'rear-nonsticky t))
+
+(defun vscode-launch-expand-fold (&optional pos)
+  "Expand the folded long-line tail at POS (default point) in place."
+  (interactive (list (if (mouse-event-p last-nonmenu-event)
+                         (posn-point (event-start last-nonmenu-event))
+                       (point))))
+  (let ((pos (or pos (point))))
+    (unless (get-text-property pos 'vscode-launch-fold)
+      (if (and (> pos (point-min)) (get-text-property (1- pos) 'vscode-launch-fold))
+          (setq pos (1- pos))
+        (user-error "No folded text here")))
+    (let ((beg pos) (end pos) pieces
+          (inhibit-read-only t))
+      (while (and (> beg (point-min)) (get-text-property (1- beg) 'vscode-launch-fold))
+        (setq beg (1- beg)))
+      (while (and (< end (point-max)) (get-text-property end 'vscode-launch-fold))
+        (push (get-text-property end 'vscode-launch-fold) pieces)
+        (setq end (1+ end)))
+      (save-excursion
+        ;; Insert before the placeholders, then delete them: markers after
+        ;; the fold (process mark, Dape's prompt) stay after the text.
+        (goto-char beg)
+        (insert (apply #'concat (nreverse pieces)))
+        (delete-region (point) (+ (point) (- end beg)))))))
+
+(defun vscode-launch--unfold-string (string)
+  "Return STRING with folded long-line placeholders replaced by their text."
+  (let ((pos 0) parts)
+    (while (< pos (length string))
+      (let ((next (next-single-property-change pos 'vscode-launch-fold string
+                                               (length string))))
+        (push (or (get-text-property pos 'vscode-launch-fold string)
+                  (substring string pos next))
+              parts)
+        (setq pos next)))
+    (apply #'concat (nreverse parts))))
+
+(defun vscode-launch--filter-buffer-substring (beg end &optional delete)
+  "Like `buffer-substring--filter' for BEG, END, DELETE, but expand folds."
+  (vscode-launch--unfold-string (buffer-substring--filter beg end delete)))
+
+(defun vscode-launch-save-output (file)
+  "Write this launch buffer's output, folded lines in full, to FILE.
+Unlike `write-file', the buffer keeps its name and does not visit FILE, so
+Dape still finds it and killing FILE's buffer never ends the session."
+  (interactive
+   (list (read-file-name
+          "Save output to file: "
+          ;; Dape may set `default-directory' without a trailing slash.
+          (file-name-as-directory default-directory) nil nil
+          (concat (replace-regexp-in-string
+                   "[^[:alnum:]._-]+" "-"
+                   (string-trim (buffer-name) "[ *]+" "[ *]+"))
+                  ".log"))))
+  (when (or (not (file-exists-p file))
+            (yes-or-no-p (format "File %s exists; overwrite? " file)))
+    (save-restriction
+      (widen)
+      (write-region (vscode-launch--unfold-string (buffer-string)) nil file))))
+
+(defun vscode-launch-send-input ()
+  "Send input like `comint-send-input', but never resend process output.
+Right after a fold, expand it.  Elsewhere in process output, do nothing:
+`comint-send-input' would copy the line to the prompt and send it."
+  (interactive)
+  (let ((proc (get-buffer-process (current-buffer))))
+    (cond ((and (> (point) (point-min))
+                (get-text-property (1- (point)) 'vscode-launch-fold))
+           (vscode-launch-expand-fold))
+          ((and proc (< (point) (process-mark proc))
+                (eq (get-char-property (field-beginning) 'field) 'output)))
+          (t (comint-send-input)))))
+
+(define-minor-mode vscode-launch-output-mode
+  "Keep launch output from being resent as input or attached to a file."
+  :keymap `((,[remap comint-send-input] . vscode-launch-send-input)
+            (,[remap write-file] . vscode-launch-save-output)
+            (,[remap save-buffer] . vscode-launch-save-output)))
+
+(defun vscode-launch--abbreviate-output (output)
+  "Fold the tail of long lines in OUTPUT before comint inserts or scans them.
+Keep state across process chunks, so an unterminated line stays bounded.
+The process filter still receives the original output for debugger detection."
+  ;; Decode ANSI on the incoming string, so no escape is split by a fold.
+  (setq output (cond ((eq ansi-color-for-comint-mode 'filter)
+                     (ansi-color-filter-apply output))
+                    (ansi-color-for-comint-mode (ansi-color-apply output))
+                    (t output)))
+  (let ((start 0)
+        (limit vscode-launch-output-max-line-length)
+        parts)
+    (while (< start (length output))
+      (let* ((newline (string-match "[\n\r]" output start))
+             (end (or newline (length output)))
+             (keep (min (- end start)
+                        (max 0 (- limit vscode-launch--output-line-length)))))
+        (when (> keep 0)
+          (push (substring output start (+ start keep)) parts)
+          (cl-incf vscode-launch--output-line-length keep))
+        (when (> (- end start) keep)
+          (push (vscode-launch--fold-segment
+                 (substring output (+ start keep) end)
+                 (<= vscode-launch--output-line-length limit))
+                parts)
+          (setq vscode-launch--output-line-length (1+ limit)))
+        (when newline
+          (push (substring output newline (1+ newline)) parts)
+          (setq vscode-launch--output-line-length 0))
+        (setq start (if newline (1+ newline) end))))
+    (apply #'concat (nreverse parts))))
+
+(defun vscode-launch--truncate-output (_output)
+  "Bound command scrollback by lines and characters, preserving user input."
+  (save-restriction
+    (widen)
+    (when-let* ((proc (or (get-buffer-process (current-buffer))
+                         vscode-launch--display-process)))
+      (save-excursion
+        (let ((inhibit-read-only t))
+          ;; Unlike `comint-truncate-buffer', this also works while the exit
+          ;; sentinel flushes output from a process no longer in the buffer.
+          (goto-char (process-mark proc))
+          (forward-line (- comint-buffer-maximum-size))
+          (beginning-of-line)
+          (delete-region (point-min) (point))
+          (let ((end (marker-position (process-mark proc))))
+            (when (> (- end (point-min)) vscode-launch-output-max-size)
+              (goto-char (- end vscode-launch-output-max-size))
+              ;; Prefer deleting whole lines, but never delete pending input.
+              (forward-line 1)
+              (delete-region (point-min) (min (point) end)))))))))
+
+(defun vscode-launch--setup-output (proc)
+  "Prepare PROC's launch buffer for sustained and long-line output.
+Also runs on `recompile', which resets the buffer's local variables."
+  (when-let* ((buf (process-buffer proc)))
+    (with-current-buffer buf
+      (when (vscode-launch--output-buffer-p)
+        (setq-local vscode-launch--output-line-length 0)
+        (setq-local ansi-color-context nil)
+        (setq-local truncate-lines t)
+        (setq-local filter-buffer-substring-function
+                    #'vscode-launch--filter-buffer-substring)
+        (vscode-launch-output-mode 1)
+        ;; Keep point and viewport updates cheap when the GUI shows logs.
+        (setq-local scroll-margin 0)
+        (setq-local scroll-conservatively 101)
+        (setq-local comint-move-point-for-output nil)
+        (setq-local comint-scroll-show-maximum-output nil)
+        (display-line-numbers-mode -1)
+        ;; Runtime logs are not compiler diagnostics.  The compiler's broad
+        ;; error regexps are expensive during redisplay (e.g. large JSON).
+        ;; Explicit `next-error' still parses diagnostics on demand.
+        (font-lock-remove-keywords nil '((compilation--ensure-parse)))
+        ;; Process output must not accumulate in undo history after truncation.
+        (buffer-disable-undo)
+        ;; Expand inherited hooks before removing ANSI processing: a local
+        ;; `remove-hook' alone still leaves the global hook reachable via t.
+        ;; ANSI is already decoded by our preoutput filter.
+        (setq-local comint-output-filter-functions
+                    (cl-loop for hook in comint-output-filter-functions
+                             append (if (eq hook t)
+                                        (remq #'ansi-color-process-output
+                                              (default-value 'comint-output-filter-functions))
+                                      (unless (eq hook #'ansi-color-process-output)
+                                        (list hook)))))
+        ;; Dape's REPL writer inserts directly and bypasses comint's
+        ;; preoutput hooks.  Its prompts still go through comint, so only
+        ;; abbreviate REPL log output in our native-writer wrapper below.
+        (unless (derived-mode-p 'dape-repl-mode)
+          (add-hook 'comint-preoutput-filter-functions
+                    #'vscode-launch--abbreviate-output nil t))
+        (add-hook 'comint-output-filter-functions
+                  #'vscode-launch--truncate-output t t)
+        (unless (process-get proc 'vscode-launch-output)
+          (process-put proc 'vscode-launch-output
+                       (vscode-launch--make-output
+                        :filter (cond ((derived-mode-p 'dape-repl-mode)
+                                       #'vscode-launch--display-dape-repl-output)
+                                      ((and (derived-mode-p 'dape-shell-mode)
+                                            dape-repl-echo-shell-output)
+                                       #'vscode-launch--display-dape-shell-output)
+                                      (t (process-filter proc)))
+                        :sentinel (process-sentinel proc)))
+          (set-process-filter proc #'vscode-launch--queue-output)
+          (set-process-sentinel proc #'vscode-launch--handle-output-exit)
+          (let ((cleanup (lambda () (vscode-launch--discard-output proc))))
+            (add-hook 'kill-buffer-hook cleanup nil t)
+            (add-hook 'change-major-mode-hook cleanup nil t)))))))
+
+(add-hook 'compilation-start-hook #'vscode-launch--setup-output)
+
+(defun vscode-launch--display-dape-repl-output (_proc output)
+  "Abbreviate OUTPUT before Dape inserts it, preserving prompts and user input."
+  (let ((vscode-launch--inserting-dape-output t))
+    (dape--repl-insert (vscode-launch--abbreviate-output output))))
+
+(defun vscode-launch--display-dape-shell-output (proc output)
+  "Display PROC's shell OUTPUT and echo it through the bounded Dape REPL queue.
+Do not use Dape's saved buffer offsets for echoing: scrollback truncation
+can invalidate those offsets while comint inserts the output."
+  (comint-output-filter proc output)
+  (dape--repl-insert output))
+
+(defun vscode-launch--queue-dape-repl-output (insert string)
+  "Queue Dape log STRING instead of inserting it synchronously with INSERT."
+  (let* ((buf (get-buffer "*dape-repl*"))
+         (proc (and buf (get-buffer-process buf))))
+    (if (and (not vscode-launch--inserting-dape-output)
+             (stringp string) proc
+             (process-get proc 'vscode-launch-output))
+        (vscode-launch--queue-output proc string)
+      (funcall insert string))))
+
+(defun vscode-launch--setup-current-dape-output ()
+  "Set up the current Dape buffer once its comint process exists."
+  (when-let* ((proc (get-buffer-process (current-buffer))))
+    (vscode-launch--setup-output proc)))
+
+(defun vscode-launch--setup-dape-output-buffers ()
+  "Apply output controls to Dape shell and REPL buffers that lack them."
+  (dolist (buf (buffer-list))
+    (with-current-buffer buf
+      (when (derived-mode-p 'dape-repl-mode 'dape-shell-mode)
+        (when-let* ((proc (get-buffer-process buf)))
+          (unless (process-get proc 'vscode-launch-output)
+            (vscode-launch--setup-output proc)))))))
+
+(defun vscode-launch--dape-terminal-request (request conn command arguments)
+  "Set up the shell Dape starts for REQUEST's runInTerminal COMMAND.
+CONN and ARGUMENTS are passed through unchanged.  Dape creates the shell
+process after `dape-shell-mode-hook' has run, so set it up afterwards."
+  (prog1 (funcall request conn command arguments)
+    (when (eq command 'runInTerminal)
+      (vscode-launch--setup-dape-output-buffers))))
+
+(with-eval-after-load 'dape
+  (add-hook 'dape-repl-mode-hook #'vscode-launch--setup-current-dape-output)
+  (advice-add 'dape--repl-insert :around #'vscode-launch--queue-dape-repl-output)
+  (advice-add 'dape-handle-request :around #'vscode-launch--dape-terminal-request))
+
 (defun vscode-launch--run-command (name plan)
   "Run PLAN's command in a comint `compile' buffer named for NAME."
   (let* ((cwd (plist-get plan :cwd))
@@ -1195,9 +1616,11 @@ restarts (nodemon) are followed by the session's `restart' option."
        (lambda (_p output)
          (unless attached
            (setq recent (concat recent (replace-regexp-in-string "\e\\[[0-9;]*[A-Za-z]" "" output)))
-           (setq recent (substring recent (max 0 (- (length recent) 4000))))
-           (when (string-match "Debugger listening on ws://\\(\\[?[^]/ ]+\\]?\\):\\([0-9]+\\)/"
-                               recent)
+           (if (not (string-match "Debugger listening on ws://\\(\\[?[^]/ ]+\\]?\\):\\([0-9]+\\)/"
+                                  recent))
+               ;; Search the whole chunk before keeping a bounded suffix:
+               ;; pipe reads may include the announcement followed by a log burst.
+               (setq recent (substring recent (max 0 (- (length recent) 4000))))
              (let ((host (match-string 1 recent))
                    (port (string-to-number (match-string 2 recent))))
                (setq attached t)

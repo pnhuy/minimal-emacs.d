@@ -124,6 +124,16 @@ Types not listed are matched against the `:type' of `dape-configs'
 entries, and you are asked to choose when several match."
   :type '(alist :key-type string :value-type symbol))
 
+(defcustom vscode-launch-host-dape-adapters nil
+  "Per-host overrides of `vscode-launch-dape-adapters'.
+An alist (HOST-REGEXP . ALIST), where ALIST maps a launch.json `type' to a
+key of `dape-configs' like `vscode-launch-dape-adapters' does.  HOST-REGEXP
+is matched against the host of a remote workspace (for /rdev:HOST: or a
+TRAMP name); the first matching entry that lists the type wins.  Local
+workspaces use only `vscode-launch-dape-adapters'."
+  :type '(alist :key-type regexp
+                :value-type (alist :key-type string :value-type symbol)))
+
 (defcustom vscode-launch-command-resolvers
   '(("python.interpreterPath" . vscode-launch--resolve-python))
   "Functions for ${command:NAME} and `command' inputs, by command name.
@@ -230,6 +240,67 @@ as an adapter argument and forwarded."
                  (and (project-current) (project-root (project-current)))
                  default-directory)))
     (directory-file-name (expand-file-name dir))))
+
+;;; Remote workspaces
+;; A root such as /rdev:HOST:/home/me/proj (or a TRAMP name) is handled by
+;; keeping every name Emacs itself touches (default-directory, files it
+;; reads, plan :cwd) a full file name, while everything handed to a
+;; process or debug adapter, which runs on the remote host, is a local name
+;; from `file-local-name'.
+
+(defun vscode-launch--expand (name root)
+  "Expand NAME against ROOT like `expand-file-name', staying on ROOT's host.
+An absolute NAME on ROOT's host (as ${workspaceFolder} produces for a
+remote root) keeps ROOT's remote prefix."
+  (let ((prefix (file-remote-p root)))
+    (if (and prefix (file-name-absolute-p name) (not (file-remote-p name)))
+        (expand-file-name (concat prefix name))
+      (expand-file-name name root))))
+
+(defun vscode-launch--local (name ctx)
+  "Return NAME without a remote prefix if it is on the host of CTX's root."
+  (if (equal (file-remote-p name) (file-remote-p (plist-get ctx :root)))
+      (file-local-name name)
+    name))
+
+(defun vscode-launch--find-exe (command root)
+  "Return the local name of COMMAND found on the host of ROOT, or nil."
+  (let ((default-directory (file-name-as-directory root)))
+    (executable-find command (and (file-remote-p root) t))))
+
+(defun vscode-launch--exe-available-p (exe root)
+  "Non-nil if the program EXE (a local name on ROOT's host) can be run."
+  (if (file-name-absolute-p exe)
+      (file-executable-p (concat (file-remote-p root) exe))
+    (and (vscode-launch--find-exe exe root) t)))
+
+(defun vscode-launch--remote-getenv (var root)
+  "Return VAR from the environment of ROOT's host, or nil if unset."
+  (if (not (file-remote-p root))
+      (getenv var)
+    (let ((default-directory (file-name-as-directory root)))
+      (with-temp-buffer
+        (when (zerop (process-file "printenv" nil t nil var))
+          (string-remove-suffix "\n" (buffer-string)))))))
+
+(defun vscode-launch--refresh-remote (root)
+  "Forget cached file metadata of ROOT's host.
+Programs we start there create files behind the file-name handler's back,
+and a cached \"does not exist\" would otherwise outlive them."
+  (when (and (file-remote-p root) (fboundp 'rdev-clear-cache))
+    (when-let* ((host (file-remote-p root 'host)))
+      (ignore-errors (rdev-clear-cache host)))))
+
+(defun vscode-launch--cache-dir (root)
+  "Return the directory for adapters installed on ROOT's host (a file name).
+On a remote host that already has `dape-adapter-dir' (same path as here, for
+instance from running dape there), reuse it; else use ~/.cache/vscode-launch."
+  (let ((prefix (file-remote-p root))
+        (dape-dir (and (boundp 'dape-adapter-dir) (expand-file-name dape-adapter-dir))))
+    (cond ((not prefix) dape-dir)
+          ((and dape-dir (file-directory-p (concat prefix dape-dir)))
+           (concat prefix dape-dir))
+          (t (expand-file-name (concat prefix "~/.cache/vscode-launch"))))))
 
 (defun vscode-launch--file (root)
   "Return the launch.json path under ROOT, or signal a user error."
@@ -442,14 +513,14 @@ CONTEXT comes from `vscode-launch-make-context'.  Inputs are prompted for."
    context))
 
 (defun vscode-launch--python (root)
-  "Return a Python interpreter for the workspace ROOT."
+  "Return a Python interpreter for the workspace ROOT, as a name on its host."
   (or (let ((venv (expand-file-name ".venv/bin/python" root)))
-        (and (file-executable-p venv) venv))
-      (let ((v (getenv "VIRTUAL_ENV")))
+        (and (file-executable-p venv) (file-local-name venv)))
+      (let ((v (and (not (file-remote-p root)) (getenv "VIRTUAL_ENV"))))
         (and v (file-executable-p (expand-file-name "bin/python" v))
              (expand-file-name "bin/python" v)))
-      (executable-find "python3")
-      (executable-find "python")
+      (vscode-launch--find-exe "python3" root)
+      (vscode-launch--find-exe "python" root)
       "python3"))
 
 (defun vscode-launch--resolve-python (ctx)
@@ -505,24 +576,27 @@ CONTEXT comes from `vscode-launch-make-context'.  Inputs are prompted for."
   (let ((root (plist-get ctx :root))
         (file (plist-get ctx :file)))
     (pcase name
-      ((or "workspaceFolder" "workspaceRoot" "cwd") root)
+      ((or "workspaceFolder" "workspaceRoot" "cwd") (file-local-name root))
       ((rx bos "workspaceFolder:" (let folder (+ anything)) eos)
        (or (alist-get folder vscode-launch-workspace-folders nil nil #'equal)
            (user-error "Unknown workspace folder `%s'; see `vscode-launch-workspace-folders'"
                        folder)))
       ("workspaceFolderBasename" (file-name-nondirectory root))
-      ("userHome" (expand-file-name "~"))
+      ("userHome" (if (file-remote-p root)
+                      (file-local-name (expand-file-name (concat (file-remote-p root) "~")))
+                    (expand-file-name "~")))
       ("pathSeparator" "/")
-      ("file" (vscode-launch--need-file name file))
+      ("file" (vscode-launch--local (vscode-launch--need-file name file) ctx))
       ("fileBasename" (file-name-nondirectory (vscode-launch--need-file name file)))
       ("fileBasenameNoExtension"
        (file-name-sans-extension (file-name-nondirectory (vscode-launch--need-file name file))))
       ("fileDirname"
-       (directory-file-name (file-name-directory (vscode-launch--need-file name file))))
+       (vscode-launch--local
+        (directory-file-name (file-name-directory (vscode-launch--need-file name file))) ctx))
       ("fileExtname"
        (let ((ext (file-name-extension (vscode-launch--need-file name file))))
          (if (and ext (not (string-empty-p ext))) (concat "." ext) "")))
-      ("fileWorkspaceFolder" (vscode-launch--need-file name file) root)
+      ("fileWorkspaceFolder" (vscode-launch--need-file name file) (file-local-name root))
       ("relativeFile" (file-relative-name (vscode-launch--need-file name file) root))
       ("relativeFileDirname"
        (directory-file-name
@@ -531,7 +605,7 @@ CONTEXT comes from `vscode-launch-make-context'.  Inputs are prompted for."
       ("selectedText" (or (plist-get ctx :selected-text)
                           (user-error "Cannot resolve ${selectedText}: no active region")))
       ((rx bos "env:" (let var (+ anything)) eos)
-       (or (getenv var)
+       (or (vscode-launch--remote-getenv var root)
            (progn (message "vscode-launch: environment variable %s is undefined" var) "")))
       ((rx bos "input:" (let id (+ anything)) eos) (vscode-launch--input id ctx))
       ((rx bos "command:" (let cmd (+ anything)) eos) (vscode-launch--command cmd ctx))
@@ -597,7 +671,7 @@ CONTEXT comes from `vscode-launch-make-context'.  Inputs are prompted for."
   (let* ((envfile (plist-get cfg :envFile))
          (from-file (when envfile
                       (vscode-launch--read-env-file
-                       (expand-file-name envfile (or root default-directory)))))
+                       (vscode-launch--expand envfile (or root default-directory)))))
          (from-env (cl-loop for (k v) on (plist-get cfg :env) by #'cddr
                             collect (cons (substring (symbol-name k) 1)
                                           (vscode-launch--scalar-string v)))))
@@ -608,24 +682,26 @@ CONTEXT comes from `vscode-launch-make-context'.  Inputs are prompted for."
   "Convert the alist ENV to a plist with keyword keys, as dape expects."
   (cl-loop for (k . v) in env append (list (intern (concat ":" k)) (or v :null))))
 
-(defun vscode-launch--exe (exe)
-  "Return a usable form of EXE.
+(defun vscode-launch--exe (exe &optional root)
+  "Return a usable form of EXE, for the host of ROOT (default: this one).
 Absolute paths that no longer exist (stale fnm/nvm shims) fall back to
 the bare command name, resolved through PATH."
-  (if (and (file-name-absolute-p exe) (not (file-executable-p exe)))
-      (let ((base (file-name-nondirectory exe)))
-        (or (executable-find base) base))
-    exe))
+  (let ((root (or root default-directory)))
+    (if (and (file-name-absolute-p exe)
+             (not (file-executable-p (concat (file-remote-p root) exe))))
+        (let ((base (file-name-nondirectory exe)))
+          (or (vscode-launch--find-exe base root) base))
+      exe)))
 
-(defun vscode-launch--fix-command-exe (command)
+(defun vscode-launch--fix-command-exe (command &optional root)
   "Apply `vscode-launch--exe' to the first word of the shell string COMMAND."
   (if (string-match "\\`\\(/[^ \t]+\\)\\(.*\\)\\'" command)
-      (concat (vscode-launch--exe (match-string 1 command)) (match-string 2 command))
+      (concat (vscode-launch--exe (match-string 1 command) root) (match-string 2 command))
     command))
 
 (defun vscode-launch--cwd (cfg root)
   "Return the working directory of CFG relative to ROOT."
-  (expand-file-name (or (plist-get cfg :cwd) ".") root))
+  (vscode-launch--expand (or (plist-get cfg :cwd) ".") root))
 
 (defun vscode-launch--arg-strings (args)
   "Return the vector ARGS as a list of strings."
@@ -658,12 +734,24 @@ the bare command name, resolved through PATH."
   "Non-nil if dape is available and `dape-configs' has KEY."
   (and (vscode-launch--dape-loaded-p) (assq key dape-configs) t))
 
-(defun vscode-launch--find-dape-key (type &optional default)
+(defun vscode-launch--explicit-dape-key (type root)
+  "Return the configured `dape-configs' key for TYPE on the host of ROOT, or nil.
+`vscode-launch-host-dape-adapters' for a remote ROOT is consulted before
+`vscode-launch-dape-adapters'."
+  (or (when-let* ((host (and root (file-remote-p root 'host))))
+        (cl-loop for (regexp . alist) in vscode-launch-host-dape-adapters
+                 when (and (string-match-p regexp host)
+                           (alist-get type alist nil nil #'equal))
+                 return (alist-get type alist nil nil #'equal)))
+      (alist-get type vscode-launch-dape-adapters nil nil #'equal)))
+
+(defun vscode-launch--find-dape-key (type &optional default root)
   "Return the `dape-configs' key to use for the launch.json TYPE, or nil.
-Order: `vscode-launch-dape-adapters', DEFAULT, a unique `:type' match
-in `dape-configs', else ask the user among several matches."
+Order: `vscode-launch-host-dape-adapters' for the host of ROOT,
+`vscode-launch-dape-adapters', DEFAULT, a unique `:type' match in
+`dape-configs', else ask the user among several matches."
   (when (vscode-launch--dape-loaded-p)
-    (let ((explicit (alist-get type vscode-launch-dape-adapters nil nil #'equal)))
+    (let ((explicit (vscode-launch--explicit-dape-key type root)))
       (cond
        ((and explicit (assq explicit dape-configs)) explicit)
        ((and default (assq default dape-configs)) default)
@@ -680,21 +768,30 @@ in `dape-configs', else ask the user among several matches."
                           (format "Several dape configs match type `%s': " type)
                           (mapcar #'symbol-name matches) nil t))))))))))
 
-(defun vscode-launch-register-adapter (type dape-key)
-  "Use the `dape-configs' entry DAPE-KEY for launch.json configurations of TYPE."
-  (setf (alist-get type vscode-launch-dape-adapters nil nil #'equal) dape-key))
+(defun vscode-launch-register-adapter (type dape-key &optional host-regexp)
+  "Use the `dape-configs' entry DAPE-KEY for launch.json configurations of TYPE.
+With HOST-REGEXP, only for remote workspaces whose host matches it, see
+`vscode-launch-host-dape-adapters'."
+  (if host-regexp
+      (let ((entry (assoc host-regexp vscode-launch-host-dape-adapters)))
+        (unless entry
+          (setq entry (list host-regexp))
+          (push entry vscode-launch-host-dape-adapters))
+        (setf (alist-get type (cdr entry) nil nil #'equal) dape-key))
+    (setf (alist-get type vscode-launch-dape-adapters nil nil #'equal) dape-key)))
 
-(defun vscode-launch--js-debug-dir ()
-  "Return the directory js-debug is (to be) installed in, or nil without dape."
-  (and (boundp 'dape-adapter-dir)
-       (expand-file-name "js-debug" dape-adapter-dir)))
+(defun vscode-launch--js-debug-dir (&optional root)
+  "Return the directory js-debug is (to be) installed in, or nil without dape.
+For a remote ROOT this is on that host, and a full file name."
+  (when-let* ((cache (vscode-launch--cache-dir (or root default-directory))))
+    (expand-file-name "js-debug" cache)))
 
-(defun vscode-launch--js-debug-installed-p ()
-  "Non-nil if the js-debug adapter used by dape is installed."
+(defun vscode-launch--js-debug-installed-p (&optional root)
+  "Non-nil if the js-debug adapter used by dape is installed for ROOT's host."
   (and (vscode-launch--dape-entry-p 'js-debug-node)
-       (vscode-launch--js-debug-dir)
+       (vscode-launch--js-debug-dir root)
        (file-exists-p (expand-file-name "src/dapDebugServer.js"
-                                        (vscode-launch--js-debug-dir)))))
+                                        (vscode-launch--js-debug-dir root)))))
 
 (defun vscode-launch--js-debug-version ()
   "Return the js-debug release tag to install."
@@ -722,127 +819,162 @@ in `dape-configs', else ask the user among several matches."
        vscode-launch--js-debug-fallback-version))))
 
 ;;;###autoload
-(defun vscode-launch-install-js-debug (&optional version)
+(defun vscode-launch-install-js-debug (&optional version root)
   "Download and install the js-debug DAP server (VERSION, default
-`vscode-launch-js-debug-version') into `dape-adapter-dir'.
+`vscode-launch-js-debug-version') for the host of ROOT (default: the
+current workspace): into `dape-adapter-dir', or for a remote workspace
+into ~/.cache/vscode-launch there.  The archive is downloaded by Emacs and
+copied over, so the remote host needs no internet access, only `tar'.
 Replaces an existing installation."
   (interactive)
   (unless (vscode-launch--dape-loaded-p)
     (user-error "dape is not available"))
-  (unless (executable-find "tar")
-    (user-error "Installing js-debug needs the `tar' program"))
-  (let* ((version (or version (vscode-launch--js-debug-version)))
+  (let* ((root (or root (vscode-launch--root)))
+         (remote (file-remote-p root))
+         (default-directory (file-name-as-directory root))
+         (version (or version (vscode-launch--js-debug-version)))
          (url (format "https://github.com/microsoft/vscode-js-debug/releases/download/%s/js-debug-dap-%s.tar.gz"
                       version version))
          (archive (make-temp-file "js-debug-dap" nil ".tar.gz"))
-         (adapters (file-name-as-directory (expand-file-name dape-adapter-dir)))
-         (stage (make-temp-file "js-debug-stage" t)))
+         (cache (file-name-as-directory (vscode-launch--cache-dir root)))
+         (dest (vscode-launch--js-debug-dir root))
+         (stage (and (not remote) (make-temp-file "js-debug-stage" t)))
+         (remote-archive (and remote (expand-file-name ".js-debug-dap.tar.gz" cache))))
+    (unless (vscode-launch--find-exe "tar" root)
+      (user-error "Installing js-debug needs the `tar' program%s"
+                  (if remote " on the remote host" "")))
     (unwind-protect
         (progn
           (message "vscode-launch: downloading js-debug %s..." version)
           (condition-case err
               (url-copy-file url archive t)
             (error (user-error "Cannot download %s: %s" url (error-message-string err))))
-          (unless (zerop (call-process "tar" nil nil nil "-xzf" archive "-C" stage))
-            (user-error "Cannot extract %s; is the version %s right?" url version))
-          (unless (file-exists-p (expand-file-name "js-debug/src/dapDebugServer.js" stage))
-            (user-error "Unexpected js-debug archive layout in %s" url))
-          (make-directory adapters t)
-          (when (file-exists-p (vscode-launch--js-debug-dir))
-            (delete-directory (vscode-launch--js-debug-dir) t))
-          (rename-file (expand-file-name "js-debug" stage) (vscode-launch--js-debug-dir))
-          (message "vscode-launch: installed js-debug %s in %s" version (vscode-launch--js-debug-dir)))
+          (make-directory cache t)
+          (let ((extract-to (if remote cache stage))
+                (from (if remote
+                          (progn (copy-file archive remote-archive t)
+                                 (file-local-name remote-archive))
+                        archive)))
+            (when remote
+              (when (file-exists-p dest) (delete-directory dest t)))
+            (unless (zerop (call-process "tar" nil nil nil "-xzf" from "-C"
+                                         (file-local-name extract-to)))
+              (vscode-launch--refresh-remote root)
+              (user-error "Cannot extract %s; is the version %s right?" url version))
+            (vscode-launch--refresh-remote root)
+            (unless (file-exists-p (expand-file-name "js-debug/src/dapDebugServer.js" extract-to))
+              (user-error "Unexpected js-debug archive layout in %s" url))
+            (unless remote
+              (when (file-exists-p dest) (delete-directory dest t))
+              (rename-file (expand-file-name "js-debug" stage) dest)))
+          (message "vscode-launch: installed js-debug %s in %s" version dest))
       (ignore-errors (delete-file archive))
-      (ignore-errors (delete-directory stage t)))
-    (vscode-launch--js-debug-dir)))
+      (when remote-archive (ignore-errors (delete-file remote-archive)))
+      (when stage (ignore-errors (delete-directory stage t))))
+    dest))
 
-(defun vscode-launch--js-debug-available-p ()
-  "Non-nil if js-debug is installed, or may be installed on demand."
+(defun vscode-launch--js-debug-available-p (&optional root)
+  "Non-nil if js-debug is installed for ROOT's host, or may be installed on demand."
   (and (vscode-launch--dape-entry-p 'js-debug-node)
-       (or (vscode-launch--js-debug-installed-p)
-           (and vscode-launch-install-js-debug (vscode-launch--js-debug-dir) t))))
+       (or (vscode-launch--js-debug-installed-p root)
+           (and vscode-launch-install-js-debug (vscode-launch--js-debug-dir root) t))))
 
-(defun vscode-launch--ensure-js-debug ()
-  "Install js-debug if missing, as `vscode-launch-install-js-debug' allows."
-  (unless (vscode-launch--js-debug-installed-p)
+(defun vscode-launch--ensure-js-debug (&optional root)
+  "Install js-debug for ROOT's host if missing, as `vscode-launch-install-js-debug' allows."
+  (unless (vscode-launch--js-debug-installed-p root)
     (if (or (eq vscode-launch-install-js-debug t)
             (and (eq vscode-launch-install-js-debug 'ask)
-                 (y-or-n-p "js-debug is not installed; download it from GitHub? ")))
-        (vscode-launch-install-js-debug)
+                 (y-or-n-p (format "js-debug is not installed%s; download it from GitHub? "
+                                   (if (file-remote-p (or root default-directory))
+                                       " on the remote host" "")))))
+        (vscode-launch-install-js-debug nil root)
       (user-error "js-debug is not installed; run `vscode-launch-install-js-debug'"))))
 
-(defun vscode-launch--debugpy-venv ()
-  "Return the directory of the dedicated debugpy virtual environment."
-  (and (boundp 'dape-adapter-dir)
-       (expand-file-name "debugpy" dape-adapter-dir)))
+(defun vscode-launch--debugpy-venv (&optional root)
+  "Return the directory of the dedicated debugpy virtual environment for ROOT's host."
+  (when-let* ((cache (vscode-launch--cache-dir (or root default-directory))))
+    (expand-file-name "debugpy" cache)))
 
-(defun vscode-launch--debugpy-python ()
-  "Return the interpreter of the dedicated debugpy environment, or nil."
-  (when-let* ((venv (vscode-launch--debugpy-venv)))
+(defun vscode-launch--debugpy-python (&optional root)
+  "Return the interpreter (a file name) of the dedicated debugpy environment, or nil."
+  (when-let* ((venv (vscode-launch--debugpy-venv root)))
     (expand-file-name "bin/python" venv)))
 
-(defun vscode-launch--has-debugpy-p (python)
-  "Non-nil if the interpreter PYTHON can import the debugpy adapter."
-  (and python (executable-find python)
-       (zerop (call-process python nil nil nil "-c" "import debugpy.adapter"))))
+(defun vscode-launch--has-debugpy-p (python &optional root)
+  "Non-nil if the interpreter PYTHON, a name on ROOT's host, can import the debugpy adapter."
+  (let* ((root (or root default-directory))
+         (default-directory (file-name-as-directory root)))
+    (and python (vscode-launch--exe-available-p python root)
+         (zerop (process-file python nil nil nil "-c" "import debugpy.adapter")))))
 
 (defun vscode-launch--call (program &rest args)
   "Run PROGRAM with ARGS; signal a `user-error' with its output on failure."
   (with-temp-buffer
-    (unless (zerop (apply #'call-process program nil t nil args))
+    (unless (zerop (apply #'process-file program nil t nil args))
       (user-error "`%s %s' failed: %s" program (string-join args " ")
                   (string-trim (buffer-string))))))
 
 ;;;###autoload
-(defun vscode-launch-install-debugpy ()
-  "Create a virtual environment for debugpy under `dape-adapter-dir'.
-The environment is separate from any project's: the debug adapter runs
-from it and launches the project's own interpreter (the `python'
-launch property), which does not need debugpy.  Running this again
-upgrades debugpy."
+(defun vscode-launch-install-debugpy (&optional root)
+  "Create a virtual environment for debugpy for the host of ROOT.
+Without a remote ROOT it goes under `dape-adapter-dir', otherwise into
+~/.cache/vscode-launch on the remote host (which needs `python3' or `uv'
+and access to a package index).  The environment is separate from any
+project's: the debug adapter runs from it and launches the project's own
+interpreter (the `python' launch property), which does not need debugpy.
+Running this again upgrades debugpy."
   (interactive)
   (unless (vscode-launch--dape-loaded-p)
     (user-error "dape is not available"))
-  (let* ((venv (vscode-launch--debugpy-venv))
-         (python (vscode-launch--debugpy-python))
-         (uv (executable-find "uv"))
-         (base (or (executable-find "python3") (executable-find "python"))))
+  (let* ((root (or root (vscode-launch--root)))
+         (default-directory (file-name-as-directory root))
+         (venv (vscode-launch--debugpy-venv root))
+         (python (vscode-launch--debugpy-python root))
+         (uv (vscode-launch--find-exe "uv" root))
+         (base (or (vscode-launch--find-exe "python3" root)
+                   (vscode-launch--find-exe "python" root))))
     (unless (or uv base)
       (user-error "Need `uv' or `python3' to create the debugpy environment"))
     (make-directory (file-name-directory venv) t)
     (message "vscode-launch: installing debugpy into %s..." venv)
     (unless (file-executable-p python)
       (if uv
-          (vscode-launch--call uv "venv" venv)
-        (vscode-launch--call base "-m" "venv" venv)))
+          (vscode-launch--call uv "venv" (file-local-name venv))
+        (vscode-launch--call base "-m" "venv" (file-local-name venv))))
     (if uv
-        (vscode-launch--call uv "pip" "install" "--python" python "--upgrade" "debugpy")
-      (vscode-launch--call python "-m" "pip" "install" "--upgrade" "debugpy"))
-    (unless (vscode-launch--has-debugpy-p python)
+        (vscode-launch--call uv "pip" "install" "--python" (file-local-name python)
+                             "--upgrade" "debugpy")
+      (vscode-launch--call (file-local-name python) "-m" "pip" "install" "--upgrade" "debugpy"))
+    (vscode-launch--refresh-remote root)
+    (unless (vscode-launch--has-debugpy-p (file-local-name python) root)
       (user-error "debugpy was installed but cannot be imported from %s" venv))
     (message "vscode-launch: installed debugpy in %s" venv)
     python))
 
-(defun vscode-launch--debugpy-adapter (project-python)
+(defun vscode-launch--debugpy-adapter (project-python &optional root)
   "Return (PYTHON . INSTALL-P): the interpreter that runs the debugpy adapter.
 Order: the dedicated environment, PROJECT-PYTHON if it has debugpy, the
 dedicated environment to be created, else PROJECT-PYTHON (dape then
-reports the missing module)."
-  (let ((own (vscode-launch--debugpy-python)))
+reports the missing module).  PYTHON is a name on the host of ROOT."
+  (let ((own (and (vscode-launch--debugpy-python root)
+                  (file-local-name (vscode-launch--debugpy-python root)))))
     (cond
-     ((and own (vscode-launch--has-debugpy-p own)) (cons own nil))
-     ((vscode-launch--has-debugpy-p project-python) (cons project-python nil))
+     ((and own (vscode-launch--has-debugpy-p own root)) (cons own nil))
+     ((vscode-launch--has-debugpy-p project-python root) (cons project-python nil))
      ((and own vscode-launch-install-debugpy) (cons own t))
      (t (cons project-python nil)))))
 
-(defun vscode-launch--ensure-debugpy ()
-  "Create the debugpy venv if missing, when `vscode-launch-install-debugpy' allows."
-  (unless (vscode-launch--has-debugpy-p (vscode-launch--debugpy-python))
-    (if (or (eq vscode-launch-install-debugpy t)
-            (and (eq vscode-launch-install-debugpy 'ask)
-                 (y-or-n-p "debugpy is not installed; create a venv for it and install it? ")))
-        (vscode-launch-install-debugpy)
-      (user-error "debugpy is not installed; run `vscode-launch-install-debugpy'"))))
+(defun vscode-launch--ensure-debugpy (&optional root)
+  "Create the debugpy venv on ROOT's host if missing, when `vscode-launch-install-debugpy' allows."
+  (let ((own (vscode-launch--debugpy-python root)))
+    (unless (vscode-launch--has-debugpy-p (and own (file-local-name own)) root)
+      (if (or (eq vscode-launch-install-debugpy t)
+              (and (eq vscode-launch-install-debugpy 'ask)
+                   (y-or-n-p (format "debugpy is not installed%s; create a venv for it and install it? "
+                                     (if (file-remote-p (or root default-directory))
+                                         " on the remote host" "")))))
+          (vscode-launch-install-debugpy root)
+        (user-error "debugpy is not installed; run `vscode-launch-install-debugpy'")))))
 
 (defun vscode-launch--to-dape-value (v)
   "Convert the parsed JSON value V to what dape expects (false -> :json-false)."
@@ -867,13 +999,30 @@ so the dape entry's own `:type' stays in effect."
            unless (or (memq k vscode-launch--planner-keys) (memq k extra-strip))
            append (list k (vscode-launch--to-dape-value v))))
 
+(defun vscode-launch--remote-dape-options (key cwd)
+  "Return the dape options that run the adapter KEY on the host of CWD.
+CWD is a full file name; nil unless it is remote.  The adapter and the
+debuggee run there, and paths the adapter reports map back to CWD's host."
+  (when (file-remote-p cwd)
+    (append (list 'command-cwd (file-name-as-directory cwd)
+                  'prefix-local (file-remote-p cwd)
+                  'prefix-remote "")
+            (when (string-prefix-p "js-debug" (symbol-name key))
+              (list 'ensure 'dape-ensure-command
+                    'command-args
+                    (list (file-local-name
+                           (expand-file-name "src/dapDebugServer.js"
+                                             (vscode-launch--js-debug-dir cwd)))
+                          :autoport "127.0.0.1"))))))
+
 (defun vscode-launch--dape-plan (key cfg root &optional extra-options extra-strip)
   "Build a :dape plan for entry KEY from CFG under ROOT."
   (let ((cwd (vscode-launch--cwd cfg root))
         (env (vscode-launch--env cfg root)))
     (list :dape :key key :cwd cwd
           :options (append extra-options
-                           (list :cwd cwd)
+                           (vscode-launch--remote-dape-options key cwd)
+                           (list :cwd (file-local-name cwd))
                            (vscode-launch--forwarded cfg extra-strip)
                            (when env (list :env (vscode-launch--env-plist env)))))))
 
@@ -882,15 +1031,16 @@ so the dape entry's own `:type' stays in effect."
   (let* ((module (plist-get cfg :module))
          (program (plist-get cfg :program))
          (python (vscode-launch--exe (or (plist-get cfg :python)
-                                         (vscode-launch--python root))))
+                                         (vscode-launch--python root))
+                                     root))
          (key (and (not force-run) vscode-launch-prefer-debugger
                    (vscode-launch--find-dape-key
-                    (plist-get cfg :type) (if module 'debugpy-module 'debugpy)))))
+                    (plist-get cfg :type) (if module 'debugpy-module 'debugpy) root))))
     (cond
      ((not (or module program))
       (list :unsupported :reason "python config has neither `program' nor `module'"))
      (key
-      (let* ((adapter (vscode-launch--debugpy-adapter python))
+      (let* ((adapter (vscode-launch--debugpy-adapter python root))
              (plan (vscode-launch--dape-plan
                     key cfg root (list 'command (car adapter) :python python) '(:python))))
         (if (cdr adapter) (append plan (list :ensure 'debugpy)) plan)))
@@ -908,16 +1058,16 @@ so the dape entry's own `:type' stays in effect."
     (cond
      ((and (not force-run) vscode-launch-prefer-debugger program
            (or (null exe) (equal (file-name-nondirectory exe) "node"))
-           (vscode-launch--js-debug-available-p)
-           (vscode-launch--find-dape-key (plist-get cfg :type) 'js-debug-node))
+           (vscode-launch--js-debug-available-p root)
+           (vscode-launch--find-dape-key (plist-get cfg :type) 'js-debug-node root))
       (vscode-launch--dape-plan
-       (vscode-launch--find-dape-key (plist-get cfg :type) 'js-debug-node) cfg root))
+       (vscode-launch--find-dape-key (plist-get cfg :type) 'js-debug-node root) cfg root))
      ((not (or exe program))
       (list :unsupported :reason "node config has neither `runtimeExecutable' nor `program'"))
      (t
       (list :run :cwd (vscode-launch--cwd cfg root) :env (vscode-launch--env cfg root)
             :command (vscode-launch--shell-join
-                      (append (list (if exe (vscode-launch--exe exe) "node"))
+                      (append (list (if exe (vscode-launch--exe exe root) "node"))
                               (vscode-launch--arg-strings (plist-get cfg :runtimeArgs))
                               (and program (list program))
                               (vscode-launch--arg-strings (plist-get cfg :args)))))))))
@@ -935,11 +1085,11 @@ Unless FORCE-RUN, also plan attaching a debugger to the node it starts."
     (if (not (stringp command))
         (list :unsupported :reason "node-terminal config has no `command'")
       (append
-       (list :run :command (vscode-launch--fix-command-exe command)
+       (list :run :command (vscode-launch--fix-command-exe command root)
              :cwd cwd
              :env (vscode-launch--env cfg root))
        (when (and (not force-run) vscode-launch-prefer-debugger
-                  (vscode-launch--js-debug-available-p)
+                  (vscode-launch--js-debug-available-p root)
                   (vscode-launch--dape-entry-p vscode-launch-node-attach-key))
          (list :attach
                (list :key vscode-launch-node-attach-key
@@ -955,18 +1105,19 @@ every module in node_modules."
   (let ((given (cl-loop for (k v) on cfg by #'cddr
                         when (memq k vscode-launch--attach-keys)
                         append (list k (vscode-launch--to-dape-value v)))))
-    (append (list :cwd cwd :restart t)
+    (append (vscode-launch--remote-dape-options vscode-launch-node-attach-key cwd)
+            (list :cwd (file-local-name cwd) :restart t)
             given
             (unless (plist-member given :resolveSourceMapLocations)
               (list :resolveSourceMapLocations
-                    (vector (concat root "/**") "!**/node_modules/**")))
+                    (vector (concat (file-local-name root) "/**") "!**/node_modules/**")))
             (unless (plist-member given :skipFiles)
               (list :skipFiles (vector "<node_internals>/**"))))))
 
 (defun vscode-launch--plan-dape-generic (cfg root force-run)
   "Plan CFG of any other type through the dape entry matching its type."
   (let* ((type (plist-get cfg :type))
-         (key (and (not force-run) (vscode-launch--find-dape-key type))))
+         (key (and (not force-run) (vscode-launch--find-dape-key type nil root))))
     (cond (key (vscode-launch--dape-plan key cfg root))
           (force-run (list :unsupported
                            :reason (format "`%s' configs can only be debugged, not run as a command" type)))
@@ -1070,13 +1221,13 @@ user error if CONFIG cannot be started under dape."
   (let* ((type (plist-get task :type))
          (opts (plist-get task :options))
          (label (plist-get task :label))
-         (cwd (expand-file-name (or (plist-get opts :cwd) ".") root))
+         (cwd (vscode-launch--expand (or (plist-get opts :cwd) ".") root))
          (args (mapcar #'vscode-launch--task-arg (append (plist-get task :args) nil)))
          (background (eq (plist-get task :isBackground) t))
          (command
           (cond
            ((equal type "npm")
-            (setq cwd (expand-file-name (or (plist-get task :path) ".") root))
+            (setq cwd (vscode-launch--expand (or (plist-get task :path) ".") root))
             (vscode-launch--shell-join
              (list "npm" "run" (or (plist-get task :script)
                                    (user-error "npm task `%s' has no `script'" label)))))
@@ -1156,7 +1307,8 @@ A background task is done once it is ready; one still running is reused."
                     (unless finished
                       (setq finished t)
                       (if ok
-                          (funcall done)
+                          (progn (vscode-launch--refresh-remote (plist-get exec :cwd))
+                                 (funcall done))
                         (message "vscode-launch: task `%s' failed, launch cancelled" label)
                         (display-buffer buf)))))
           (add-function :after (process-sentinel proc)
@@ -1585,7 +1737,10 @@ process after `dape-shell-mode-hook' has run, so set it up afterwards."
 (with-eval-after-load 'dape
   (add-hook 'dape-repl-mode-hook #'vscode-launch--setup-current-dape-output)
   (advice-add 'dape--repl-insert :around #'vscode-launch--queue-dape-repl-output)
-  (advice-add 'dape-handle-request :around #'vscode-launch--dape-terminal-request))
+  (advice-add 'dape-handle-request :around #'vscode-launch--dape-terminal-request)
+  (advice-add 'make-network-process :around #'vscode-launch--gate-connect))
+
+(add-hook 'kill-emacs-hook #'vscode-launch--kill-tunnel)
 
 (defun vscode-launch--run-command (name plan)
   "Run PLAN's command in a comint `compile' buffer named for NAME."
@@ -1635,12 +1790,166 @@ restarts (nodemon) are followed by the session's `restart' option."
                     (error (message "vscode-launch: cannot attach the debugger: %s"
                                     (error-message-string err))))))))))))))
 
+;;; SSH tunnel to a remote adapter
+;; rdev (and TRAMP) do not forward ports, but dape connects to the adapter's
+;; DAP port on localhost.  For a remote workspace the adapter therefore
+;; listens on the remote loopback and an `ssh -L' forwards it.
+
+(defvar vscode-launch--tunnel nil
+  "The `ssh -L' process of the current remote debug session, if any.")
+
+(defvar vscode-launch--tunnel-timer nil
+  "Timer that stops the tunnel once the debug session it served is over.")
+
+(defvar vscode-launch--gate nil
+  "(LOCAL-PORT CWD . REMOTE-PORT) while dape must wait for the remote adapter.")
+
+(defun vscode-launch--kill-tunnel (&rest _)
+  "Stop the SSH tunnel of the last remote debug session."
+  (when (timerp vscode-launch--tunnel-timer)
+    (cancel-timer vscode-launch--tunnel-timer))
+  (setq vscode-launch--tunnel-timer nil vscode-launch--gate nil)
+  (when (process-live-p vscode-launch--tunnel)
+    (let ((buf (process-buffer vscode-launch--tunnel)))
+      (delete-process vscode-launch--tunnel)
+      (when (buffer-live-p buf) (kill-buffer buf))))
+  (setq vscode-launch--tunnel nil))
+
+(defun vscode-launch--watch-tunnel ()
+  "Stop the tunnel once dape has had a connection and no longer has one.
+Give up after a minute without any connection."
+  (let ((started (float-time)) (seen nil))
+    (setq vscode-launch--tunnel-timer
+          (run-with-timer
+           2 2
+           (lambda ()
+             (let ((live (and (boundp 'dape--connections) dape--connections)))
+               (cond (live (setq seen t))
+                     ((or seen (> (- (float-time) started) 60))
+                      (vscode-launch--kill-tunnel)))))))))
+
+(defun vscode-launch--remote-listening-p (cwd port)
+  "Non-nil if a TCP socket on the host of CWD is LISTENing on PORT.
+Read from /proc, so that nothing connects to the adapter."
+  (let ((default-directory (file-name-as-directory cwd))
+        (python (vscode-launch--find-exe "python3" cwd)))
+    (and python
+         (zerop (process-file
+                 python nil nil nil "-c"
+                 (concat "import sys,os\n"
+                         "p=':%04X'%int(sys.argv[1])\n"
+                         "ok=False\n"
+                         "for f in ('/proc/net/tcp','/proc/net/tcp6'):\n"
+                         " if os.path.exists(f):\n"
+                         "  ok=ok or any(l.split()[1].endswith(p) and l.split()[3]=='0A'"
+                         " for l in open(f).readlines()[1:])\n"
+                         "sys.exit(0 if ok else 1)")
+                 (number-to-string port))))))
+
+(defun vscode-launch--gate-connect (orig &rest args)
+  "Around advice for `make-network-process': hold dape's connection to the tunnel.
+An `ssh -L' accepts connections before the adapter listens and then drops
+them, so wait until the remote port is LISTENING (at most 30s)."
+  (let ((gate vscode-launch--gate))
+    (when (and gate (eql (plist-get args :service) (car gate)))
+      (setq vscode-launch--gate nil)
+      (let ((deadline (+ (float-time) 30)))
+        (while (and (< (float-time) deadline)
+                    (process-live-p vscode-launch--tunnel)
+                    (not (vscode-launch--remote-listening-p (cadr gate) (cddr gate))))
+          (sleep-for 0.3)))))
+  (apply orig args))
+
+(defun vscode-launch--port-listening-p (port)
+  "Non-nil if something on 127.0.0.1 already listens on PORT.
+Probed by trying to listen on it ourselves, so that no stray connection
+reaches the adapter."
+  (let ((probe (ignore-errors
+                 (make-network-process :name "vscode-launch-port-probe" :server t
+                                       :host "127.0.0.1" :service port :noquery t))))
+    (if probe (progn (delete-process probe) nil) t)))
+
+(defun vscode-launch--remote-free-port (cwd)
+  "Return a port that is free on the host of CWD, or nil if it cannot be asked."
+  (let ((default-directory (file-name-as-directory cwd))
+        (python (vscode-launch--find-exe "python3" cwd)))
+    (when python
+      (with-temp-buffer
+        (when (zerop (process-file
+                      python nil t nil "-c"
+                      "import socket;s=socket.socket();s.bind(('127.0.0.1',0));print(s.getsockname()[1])"))
+          (let ((n (string-to-number (buffer-string))))
+            (and (> n 0) n)))))))
+
+(defun vscode-launch--open-tunnel (cwd port remote-port)
+  "Forward local PORT to 127.0.0.1:REMOTE-PORT on the host of CWD over SSH."
+  (vscode-launch--kill-tunnel)
+  (let* ((host (file-remote-p cwd 'host))
+         (user (file-remote-p cwd 'user))
+         (spec (and (boundp 'rdev-hosts) (cdr (assoc host rdev-hosts))))
+         (_ (when (eq (plist-get spec :transport) 'tcp)
+              (user-error "Host %s uses the tcp transport; no SSH tunnel is possible" host)))
+         (dest (or (plist-get spec :ssh-host) host))
+         (target (if (and user (not (string-match-p "@" dest))) (concat user "@" dest) dest))
+         (args (append (and (boundp 'rdev-ssh-args) rdev-ssh-args)
+                       (list "-N" "-o" "ExitOnForwardFailure=yes"
+                             "-L" (format "127.0.0.1:%d:127.0.0.1:%d" port remote-port)
+                             "--" target)))
+         (proc (make-process :name "vscode-launch-tunnel" :noquery t
+                             :buffer (generate-new-buffer " *vscode-launch-tunnel*")
+                             :command (cons "ssh" args)))
+         (deadline (+ (float-time) 15)))
+    (setq vscode-launch--tunnel proc)
+    (while (and (process-live-p proc)
+                (not (vscode-launch--port-listening-p port))
+                (< (float-time) deadline))
+      (accept-process-output proc 0.1))
+    (unless (and (process-live-p proc) (vscode-launch--port-listening-p port))
+      (let ((out (with-current-buffer (process-buffer proc) (string-trim (buffer-string)))))
+        (vscode-launch--kill-tunnel)
+        (user-error "Cannot open an SSH tunnel to %s for port %d%s" target port
+                    (if (string-empty-p out) "" (concat ": " out)))))
+    (setq vscode-launch--gate (cons port (cons cwd remote-port)))
+    (vscode-launch--watch-tunnel)
+    proc))
+
+(defun vscode-launch--remote-config (config cwd)
+  "Prepare the evaluated dape CONFIG to run its adapter on the host of CWD."
+  (when (and (eq (plist-get config 'port) :autoport) (fboundp 'dape-config-autoport))
+    (setq config (dape-config-autoport config)))
+  ;; The adapter listens on a port that is free on the remote host (which
+  ;; need not be the one that was free here), on its loopback only: just the
+  ;; tunnel has to reach it.
+  (let* ((port (plist-get config 'port))
+         (remote-port (or (and (integerp port) (vscode-launch--remote-free-port cwd)) port))
+         (from (and (integerp port) (number-to-string port)))
+         (to (and (integerp remote-port) (number-to-string remote-port))))
+    (when-let* ((args (plist-get config 'command-args)))
+      (setq config
+            (plist-put config 'command-args
+                       (seq-map (lambda (a)
+                                  (cond ((equal a "0.0.0.0") "127.0.0.1")
+                                        ((and (stringp a) from (equal from a)) to)
+                                        ((and (stringp a) from
+                                              (string-match (concat "\\`\\(.*[:=]\\)" from "\\'") a))
+                                         (concat (match-string 1 a) to))
+                                        (t a)))
+                                args))))
+    (when (integerp port)
+      (vscode-launch--open-tunnel cwd port remote-port)))
+  config)
+
 (defun vscode-launch--run-dape (plan)
   "Start a dape session from PLAN."
   (unless (and (vscode-launch--dape-loaded-p) (fboundp 'dape--config-eval))
     (user-error "dape is not available"))
-  (let ((default-directory (file-name-as-directory (plist-get plan :cwd))))
-    (dape (dape--config-eval (plist-get plan :key) (plist-get plan :options)))))
+  (let* ((cwd (plist-get plan :cwd))
+         (default-directory (file-name-as-directory cwd))
+         (config (dape--config-eval (plist-get plan :key) (plist-get plan :options))))
+    (condition-case err
+        (dape (if (file-remote-p cwd) (vscode-launch--remote-config config cwd) config))
+      (error (vscode-launch--kill-tunnel)
+             (signal (car err) (cdr err))))))
 
 (defun vscode-launch--run-plan (name plan)
   "Execute PLAN for the configuration called NAME."
@@ -1720,14 +2029,14 @@ against compounds that contain themselves."
     (when (> (cl-count :dape plans :key (lambda (p) (car (cdr p)))) 1)
       (user-error "`%s' would start several debug sessions; dape supports one at a time" name))
     (when (cl-some (lambda (p) (eq (plist-get (cdr (cdr p)) :ensure) 'debugpy)) plans)
-      (vscode-launch--ensure-debugpy))
+      (vscode-launch--ensure-debugpy root))
     (when (cl-some (lambda (p)
                      (let ((plan (cdr p)))
                        (or (and (eq (car plan) :dape)
                                 (string-prefix-p "js-debug" (symbol-name (plist-get (cdr plan) :key))))
                            (and (eq (car plan) :run) (plist-get (cdr plan) :attach)))))
                    plans)
-      (vscode-launch--ensure-js-debug))
+      (vscode-launch--ensure-js-debug root))
     (vscode-launch--run-steps plans)))
 
 (defun vscode-launch--run-steps (steps)

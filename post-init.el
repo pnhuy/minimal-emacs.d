@@ -1214,10 +1214,11 @@ lines up again."
   :if (display-graphic-p)
   :demand t
   :config
-  ;; Newer Org versions define the annotation LaTeX header in this module.
-  (require 'org)
-  (unless (boundp 'org-format-latex-header)
-    (require 'org-latex-preview))
+  ;; ;; Disable loading org because of fork version stopping init
+  ;; ;; Newer Org versions define the annotation LaTeX header in this module.
+  ;; (require 'org)
+  ;; (unless (boundp 'org-format-latex-header)
+  ;;   (require 'org-latex-preview))
   (pdf-tools-install :no-query)
 
   (setq-default pdf-view-display-size 'fit-page

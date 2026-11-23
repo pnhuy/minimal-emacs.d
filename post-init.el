@@ -25,6 +25,8 @@
   :hook
   (org-mode . org-latex-preview-mode)
   :config
+  (require 'org-latex-preview nil t)
+  (when (boundp 'org-latex-preview-preamble)
   (setq org-latex-preview-preamble
         (concat
          (replace-regexp-in-string
@@ -32,8 +34,7 @@
           "\\documentclass[fleqn]{article}"
           org-latex-preview-preamble
           t t)
-         "\n\\setlength{\\mathindent}{0pt}\n"))
-)
+           "\n\\setlength{\\mathindent}{0pt}\n"))))
 
 
 (use-package cookiecutter

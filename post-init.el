@@ -293,7 +293,9 @@
 (use-package vertico
   :ensure t
   :custom
-  (vertico-resize t)
+  (vertico-resize nil)
+  (vertico-count 5)
+  (vertico-cycle t)
   :init
   (vertico-mode 1))
 

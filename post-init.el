@@ -1317,6 +1317,87 @@ lines up again."
   :vc (:url "https://github.com/xiaoxinghu/portal" :rev :newest)
   :defer t)
 
+(use-package wingman
+  :vc (:url "https://github.com/mjrusso/wingman" :rev :newest)
+  :init
+  (defvar my/wingman-server nil)
+
+  (defun my/wingman-disable ()
+    "Disable `wingman-mode' and stop llama-server if it is running."
+    (interactive)
+    ;; check and remove the hook so it doesn't restart on the next `prog-mode' buffer.
+    (when (memq 'my/wingman-enable prog-mode-hook)
+      (remove-hook 'prog-mode-hook #'my/wingman-enable))
+    (wingman-mode -1)
+    (when (process-live-p my/wingman-server)
+      (delete-process my/wingman-server)))
+
+  (defun my/wingman-enable ()
+    "Start llama-server (if needed) and enable `wingman-mode'."
+    (interactive)
+    ;; check if no hook, add hook to prog-mode first
+    (unless (memq 'my/wingman-enable prog-mode-hook)
+      (add-hook 'prog-mode-hook #'my/wingman-enable))
+    (unless (process-live-p my/wingman-server)
+      (setq my/wingman-server
+            (make-process
+             :name "wingman-llama-server"
+             :buffer "*wingman-llama-server*"
+             :command '("llama-server"
+                        "-hf" "lmstudio-community/Qwen2.5-Coder-0.5B-GGUF:Q4_K_M"
+                        "--host" "127.0.0.1" "--port" "8012"
+                        "-c" "4096" "-ngl" "99" "-t" "4" "-np" "1")
+             :connection-type 'pipe
+             :noquery t)))
+    (wingman-mode 1))
+
+  (defun my/wingman-strip-indent (args)
+    "Filter-args for `wingman--render': drop the model's duplicate indent.
+If only whitespace precedes point, the suggestion already continues
+after it, so remove the suggestion's own leading whitespace."
+    (pcase-let ((`(,raw ,indent ,buf ,marker) args))
+      (if-let* (((with-current-buffer buf
+                   (save-excursion
+                     (when marker (goto-char marker))
+                     (looking-back "^[ \t]+" (pos-bol)))))
+                (resp (ignore-errors (json-read-from-string raw))))
+          (progn (setf (alist-get 'content resp)
+                       (string-trim-left (alist-get 'content resp "")))
+                 (list (json-encode resp) indent buf marker))
+        args)))
+
+  (defun my/wingman-keep-cursor (_raw _indent buf &rest _)
+    "Draw the cursor before the ghost text instead of after it."
+    (with-current-buffer buf
+      (when-let* ((ov wingman--hint-overlay)
+                  ((overlayp ov))
+                  (s (copy-sequence (overlay-get ov 'after-string)))
+                  ((> (length s) 0)))
+        (put-text-property 0 1 'cursor t s)
+        (overlay-put ov 'after-string s))))
+
+  :config
+  (advice-add 'wingman--render :filter-args #'my/wingman-strip-indent)
+  (advice-add 'wingman--render :after #'my/wingman-keep-cursor)
+
+  :custom
+  (wingman-n-predict 8)
+  ;; "\n" keeps suggestions to one line.  The rest are FIM end tokens that some
+  ;; GGUFs don't declare as EOG, so the server would otherwise generate past
+  ;; them: StarCoder2 <file_sep>, DeepSeek <|EOT|>, CodeGemma
+  ;; <|file_separator|>, StarCoderBase/Qwen <|endoftext|> and <|fim_pad|>.
+  (wingman-stop-strings '("\n" "<file_sep>" "<|EOT|>" "<|file_separator|>"
+                          "<|endoftext|>" "<|fim_pad|>" "<|im_end|>" "<eos>"))
+
+  :bind 
+  (:map wingman-mode-map
+        ("M-{" . wingman-accept-word)
+        ("M-[" . wingman-accept-line))
+
+  :hook
+  ;; (prog-mode . my/wingman-enable)
+  (kill-emacs . (lambda () (when (process-live-p my/wingman-server)
+                             (delete-process my/wingman-server)))))
 (provide 'post-init)
 
 ;;; post-init.el ends here

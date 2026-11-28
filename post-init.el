@@ -1413,6 +1413,17 @@ after it, so remove the suggestion's own leading whitespace."
   ;; (prog-mode . my/wingman-enable)
   (kill-emacs . (lambda () (when (process-live-p my/wingman-server)
                              (delete-process my/wingman-server)))))
+
+(use-package keycast
+  :ensure t
+  :hook (after-init . keycast-mode-line-mode)
+  :config
+  (set-face-attribute 'keycast-key nil
+                      :foreground 'unspecified
+                      :background 'unspecified
+                      :inherit 'unspecified )
+  (setq keycast-mode-line-insert-after 'mode-line-end-spaces))
+
 (provide 'post-init)
 
 ;;; post-init.el ends here

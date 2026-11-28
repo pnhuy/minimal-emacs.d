@@ -188,6 +188,12 @@
 ;;; Tab Line (VS Code-style buffer tabs)
 ;;; ----------------------------------------------------------------------
 
+;; Keep theme defaults from enabling the frame-wide tab bar.
+(custom-theme-set-variables
+ 'user
+ '(tab-bar-show nil)
+ '(tab-bar-mode nil))
+
 (use-package tab-line
   :ensure nil
   :init
@@ -216,6 +222,7 @@
   (display-line-numbers-mode -1))
 (dolist (hook '(dired-mode-hook
                 dired-sidebar-mode-hook
+                image-mode-hook
                 term-mode-hook
                 shell-mode-hook
                 eshell-mode-hook
@@ -382,6 +389,11 @@
   ;; Keep candidate previews from changing the displayed text at point.
   ;; TAB still inserts the selected candidate explicitly.
   (corfu-preview-current nil)
+
+  ;; Exclusion
+  (global-corfu-modes '((not shell-mode)
+                        (not eshell-mode)
+                        t))
 
   :bind
   (:map corfu-map
@@ -565,6 +577,7 @@ Keep the server's order for fuzzy matches and equally ranked names."
     (add-hook 'completion-at-point-functions my/eglot-capf -10 t)))
 
 (add-hook 'eglot-managed-mode-hook #'my/eglot-capf-setup)
+(add-hook 'eglot-managed-mode-hook #'flymake-start) ;; show the error when start
 
 
 ;;; ----------------------------------------------------------------------
